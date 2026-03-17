@@ -2,7 +2,7 @@
 
 Custom Home Assistant integration for DEVI Smart / Danfoss floor-heating thermostats.
 
-This repository is prepared for installation through HACS as a custom integration. The runtime code required by Home Assistant is bundled inside [`custom_components/devi`](/Users/karolszpakowski/projects/opensdg/custom_components/devi), so the integration no longer depends on installing the repo-root `pydevi` package.
+This repository is prepared for installation through HACS as a custom integration. The runtime code required by Home Assistant is bundled inside `custom_components/devi`, so the integration does not depend on installing any separate repo-root Python package.
 
 ## Features
 
@@ -24,7 +24,7 @@ This repository is prepared for installation through HACS as a custom integratio
 
 ### Manual
 
-1. Copy [`custom_components/devi`](/Users/karolszpakowski/projects/opensdg/custom_components/devi) into your Home Assistant `config/custom_components/` directory.
+1. Copy `custom_components/devi` into your Home Assistant `config/custom_components/` directory.
 2. Restart Home Assistant.
 3. Add `DEVI Smart` from `Settings` -> `Devices & services`.
 
@@ -91,9 +91,9 @@ Use Home Assistant diagnostics for the `DEVI Smart` config entry. Sensitive valu
 
 ## Development
 
-- HACS validation workflow: [`.github/workflows/validate.yml`](/Users/karolszpakowski/projects/opensdg/.github/workflows/validate.yml)
-- Hassfest workflow: [`.github/workflows/hassfest.yml`](/Users/karolszpakowski/projects/opensdg/.github/workflows/hassfest.yml)
-- Test workflow: [`.github/workflows/tests.yml`](/Users/karolszpakowski/projects/opensdg/.github/workflows/tests.yml)
-- Release checks: [`.github/workflows/release-checks.yml`](/Users/karolszpakowski/projects/opensdg/.github/workflows/release-checks.yml)
+- HACS validation workflow: `.github/workflows/validate.yml`
+- Hassfest workflow: `.github/workflows/hassfest.yml`
+- Test workflow: `.github/workflows/tests.yml`
+- Release checks: `.github/workflows/release-checks.yml`
 
-Published versions should be released through GitHub Releases. The release tag must match the integration version in [`custom_components/devi/manifest.json`](/Users/karolszpakowski/projects/opensdg/custom_components/devi/manifest.json).
+Published versions should be released through GitHub Releases. The release tag must match the integration version in `custom_components/devi/manifest.json`.

@@ -3,9 +3,9 @@
   "name": "DEVI Smart",
   "codeowners": ["@karolszpakowski"],
   "config_flow": true,
-  "documentation": "https://github.com/kszpakowski/devi-ha#readme",
+  "documentation": "https://github.com/kszpakowski/devi-smart-hacs#readme",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/kszpakowski/devi-ha/issues",
+  "issue_tracker": "https://github.com/kszpakowski/devi-smart-hacs/issues",
   "requirements": ["PyNaCl>=1.5.0", "pycryptodome>=3.20.0"],
   "version": "0.1.0"
 }
