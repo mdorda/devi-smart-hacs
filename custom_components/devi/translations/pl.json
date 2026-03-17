@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DEVI Smart",
+        "description": "Sparuj Home Assistant z domem DEVI Smart.",
+        "data": {
+          "client_name": "Nazwa klienta",
+          "otp": "Jednorazowy kod parowania"
+        }
+      }
+    },
+    "error": {
+      "invalid_otp": "Kod parowania został odrzucony przez usługę DEVI Smart. Wygeneruj nowy kod i spróbuj ponownie.",
+      "cannot_connect": "Nie można połączyć się z usługą DEVI Smart.",
+      "transport_not_ready": "Transport parowania SecureDeviceGrid wymaga jeszcze weryfikacji przed pierwszym użyciem na żywo."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje DEVI Smart",
+        "data": {
+          "enable_advanced_entities": "Włącz encje zaawansowane",
+          "enable_diagnostic_entities": "Włącz encje diagnostyczne",
+          "scan_interval_seconds": "Interwał odpytywania (sekundy)"
+        }
+      }
+    }
+  }
+}

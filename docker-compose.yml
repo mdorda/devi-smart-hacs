@@ -1,0 +1,15 @@
+services:
+  homeassistant:
+    build:
+      context: .
+      dockerfile: docker/homeassistant/Dockerfile
+    container_name: devi-homeassistant
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: Europe/Warsaw
+    volumes:
+      - ./docker/homeassistant/config:/config
+      - ./custom_components/devi:/config/custom_components/devi
+

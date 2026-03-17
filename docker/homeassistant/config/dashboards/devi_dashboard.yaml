@@ -1,0 +1,47 @@
+title: DEVI Schedule
+resources:
+  - url: /local/devi-schedule-card.js?v=2
+    type: module
+views:
+  - title: Schedule
+    path: schedule
+    icon: mdi:calendar-clock
+    cards:
+      - type: vertical-stack
+        title: Prysznic
+        cards:
+          - type: thermostat
+            entity: climate.prysznic_prysznic
+            name: Prysznic
+          - type: custom:devi-schedule-card
+            climate_entity: climate.prysznic_prysznic
+            title: Weekly Schedule
+          - type: entities
+            title: Away Mode
+            show_header_toggle: false
+            entities:
+              - entity: switch.prysznic_prysznic_away_planned
+                name: Away Planned
+              - entity: datetime.prysznic_prysznic_away_start
+                name: Away Start
+              - entity: datetime.prysznic_prysznic_away_end
+                name: Away End
+      - type: vertical-stack
+        title: Wanna
+        cards:
+          - type: thermostat
+            entity: climate.wanna_wanna
+            name: Wanna
+          - type: custom:devi-schedule-card
+            climate_entity: climate.wanna_wanna
+            title: Weekly Schedule
+          - type: entities
+            title: Away Mode
+            show_header_toggle: false
+            entities:
+              - entity: switch.wanna_wanna_away_planned
+                name: Away Planned
+              - entity: datetime.wanna_wanna_away_start
+                name: Away Start
+              - entity: datetime.wanna_wanna_away_end
+                name: Away End

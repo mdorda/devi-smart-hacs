@@ -1,0 +1,37 @@
+build*
+obj-*
+debian/.debhelper
+debian/debhelper-build-stamp
+debian/files
+debian/opensdg*
+debian/tmp
+java/target
+java/*.jar
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.venv/
+dist/
+*.egg-info/
+
+# Home Assistant / Docker local state
+docker/homeassistant/config/*
+!docker/homeassistant/config/configuration.yaml
+!docker/homeassistant/config/dashboards/
+docker/homeassistant/config/dashboards/*
+!docker/homeassistant/config/dashboards/devi_dashboard.yaml
+!docker/homeassistant/config/www/
+docker/homeassistant/config/www/*
+!docker/homeassistant/config/www/devi-schedule-card.js
+!docker/homeassistant/config/custom_components/
+docker/homeassistant/config/custom_components/*
+!docker/homeassistant/config/custom_components/.gitkeep
+
+# macOS
+.DS_Store

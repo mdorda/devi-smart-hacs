@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DEVI Smart",
+        "description": "Pair Home Assistant with your DEVI Smart house.",
+        "data": {
+          "client_name": "Client name",
+          "otp": "One-time pairing code"
+        }
+      }
+    },
+    "error": {
+      "invalid_otp": "The pairing code was rejected by the DEVI Smart service. Generate a fresh code and try again.",
+      "cannot_connect": "Unable to connect to the DEVI Smart service.",
+      "transport_not_ready": "SecureDeviceGrid pairing transport needs packet-capture verification before first live pairing."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DEVI Smart options",
+        "data": {
+          "enable_advanced_entities": "Enable advanced entities",
+          "enable_diagnostic_entities": "Enable diagnostic entities",
+          "scan_interval_seconds": "Polling interval (seconds)"
+        }
+      }
+    }
+  }
+}

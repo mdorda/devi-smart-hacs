@@ -1,0 +1,21 @@
+default_config:
+
+frontend:
+  extra_module_url:
+    - /local/devi-schedule-card.js?v=2
+
+logger:
+  default: info
+  logs:
+    custom_components.devi: debug
+    pydevi: debug
+
+lovelace:
+  mode: storage
+  dashboards:
+    devi-schedule:
+      mode: yaml
+      title: DEVI Schedule
+      icon: mdi:calendar-clock
+      show_in_sidebar: true
+      filename: dashboards/devi_dashboard.yaml
