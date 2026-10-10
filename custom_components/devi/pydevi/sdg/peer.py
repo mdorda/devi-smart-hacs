@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
 
 from .grid import GridSession, SDGProtocolError
 
@@ -22,7 +23,16 @@ class PeerSession:
 
     async def connect(self) -> None:
         if self._connection is None or not self._connection.connected:
-            self._connection = await self.grid.connect_to_remote(self.peer_id, self.protocol)
+            started_at = monotonic()
+            try:
+                self._connection = await self.grid.connect_to_remote(self.peer_id, self.protocol)
+            except Exception as exc:
+                LOGGER.warning(
+                    "DEVI peer connect failed peer=%s elapsed_s=%.2f error=%s errno=%s",
+                    self.peer_id, monotonic() - started_at, type(exc).__name__, getattr(exc, "errno", None),
+                )
+                raise
+            LOGGER.info("DEVI peer connected peer=%s elapsed_s=%.2f", self.peer_id, monotonic() - started_at)
 
     async def disconnect(self) -> None:
         connection, self._connection = self._connection, None
@@ -34,7 +44,7 @@ class PeerSession:
 
     async def send(self, payload: bytes) -> None:
         async with self._op_lock:
-            await self._run_with_reconnect(lambda: self._connection.send_peer_data(payload))
+            await self._run_with_reconnect(lambda: self._connection.send_peer_data(payload), operation="send")
 
     async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:
         async with self._op_lock:
@@ -48,14 +58,24 @@ class PeerSession:
                     raise SDGProtocolError("peer returned no response")
                 return responses
 
-            return await self._run_with_reconnect(read_response)
+            return await self._run_with_reconnect(read_response, operation="request")
 
-    async def _run_with_reconnect(self, action):
+    async def _run_with_reconnect(self, action, operation: str):
         for attempt in range(2):
             await self.connect()
+            started_at = monotonic()
             try:
-                return await action()
-            except (SDGProtocolError, ConnectionError, OSError, asyncio.IncompleteReadError):
+                result = await action()
+                if attempt:
+                    LOGGER.info("DEVI peer recovered peer=%s operation=%s", self.peer_id, operation)
+                return result
+            except (SDGProtocolError, ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
+                LOGGER.warning(
+                    "DEVI peer operation failed peer=%s operation=%s attempt=%d elapsed_s=%.2f error=%s errno=%s recovery=%s",
+                    self.peer_id, operation, attempt + 1, monotonic() - started_at,
+                    type(exc).__name__, getattr(exc, "errno", None),
+                    "reconnect" if attempt == 0 else "next_poll",
+                )
                 await self.disconnect()
                 if attempt == 1:
                     raise

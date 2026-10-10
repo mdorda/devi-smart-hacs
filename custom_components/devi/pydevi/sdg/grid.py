@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 import random
 import struct
+from time import monotonic
 
 from ..models import HouseConfig, ThermostatInfo
 from ..dominion.codec import DominionPacket
@@ -96,6 +97,11 @@ class _RemoteConnection:
     _pairing_expected: bytes | None = None
     _nonce: int = 0
     _discard_first_bytes: int = 0
+    _created_at: float = field(default_factory=monotonic)
+    _last_rx_at: float | None = None
+    _last_tx_at: float | None = None
+    _rx_frames: int = 0
+    _tx_frames: int = 0
 
     def __post_init__(self) -> None:
         self.client_temp_public_key = b""
@@ -117,23 +123,56 @@ class _RemoteConnection:
     def peer_id_bytes(self) -> bytes:
         return bytes.fromhex(self.peer_id_hex) if self.peer_id_hex else bytes(CRYPTO_BOX_PUBLICKEYBYTES)
 
+    def diagnostic_context(self) -> str:
+        """Describe transport health without logging keys or message contents."""
+        now = monotonic()
+        rx_idle = f"{now - self._last_rx_at:.1f}" if self._last_rx_at is not None else "never"
+        tx_idle = f"{now - self._last_tx_at:.1f}" if self._last_tx_at is not None else "never"
+        return (
+            f"mode={self.mode} peer={self.peer_id_hex} "
+            f"remote={self.writer.get_extra_info('peername')} "
+            f"age_s={now - self._created_at:.1f} "
+            f"rx_idle_s={rx_idle} tx_idle_s={tx_idle} "
+            f"rx_frames={self._rx_frames} tx_frames={self._tx_frames} "
+            f"closing={self.writer.is_closing()} eof={self.reader.at_eof()}"
+        )
+
     async def close(self) -> None:
         LOGGER.debug("SDG close mode=%s protocol=%s peer_id=%s", self.mode, self.protocol, self.peer_id_hex)
         self.connected = False
         self.writer.close()
         try:
             await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
-        except (OSError, TimeoutError):
-            LOGGER.debug("SDG ignore transport error during close", exc_info=True)
+        except (OSError, TimeoutError) as exc:
+            LOGGER.debug("SDG close failed error=%s errno=%s %s", type(exc).__name__, getattr(exc, "errno", None), self.diagnostic_context())
 
     async def send_raw(self, payload: bytes) -> None:
-        self.writer.write(payload)
-        await self.writer.drain()
+        try:
+            self.writer.write(payload)
+            await self.writer.drain()
+        except OSError as exc:
+            LOGGER.warning(
+                "SDG write failed error=%s errno=%s bytes=%d %s",
+                type(exc).__name__, exc.errno, len(payload), self.diagnostic_context(),
+            )
+            raise
+        self._last_tx_at = monotonic()
+        self._tx_frames += 1
 
     async def read_frame(self) -> bytes:
-        size_prefix = await self.reader.readexactly(2)
-        size = struct.unpack(">H", size_prefix)[0]
-        return size_prefix + await self.reader.readexactly(size)
+        try:
+            size_prefix = await self.reader.readexactly(2)
+            size = struct.unpack(">H", size_prefix)[0]
+            frame = size_prefix + await self.reader.readexactly(size)
+        except OSError as exc:
+            LOGGER.warning(
+                "SDG read failed error=%s errno=%s %s",
+                type(exc).__name__, exc.errno, self.diagnostic_context(),
+            )
+            raise
+        self._last_rx_at = monotonic()
+        self._rx_frames += 1
+        return frame
 
     def _next_nonce_value(self) -> int:
         value = self._nonce
@@ -387,17 +426,28 @@ class _RemoteConnection:
             first_chunk_timeout,
             idle_timeout,
         )
+        started_at = monotonic()
         await self._send_mesg_data(payload)
         responses: list[bytes] = []
         while True:
             try:
                 timeout = first_chunk_timeout if not responses else idle_timeout
                 frame = await asyncio.wait_for(self.read_frame(), timeout)
-            except asyncio.IncompleteReadError:
-                LOGGER.debug("SDG peer data EOF chunks=%d", len(responses))
+            except asyncio.IncompleteReadError as exc:
+                LOGGER.warning(
+                    "SDG peer EOF chunks=%d partial_bytes=%d expected_bytes=%s elapsed_s=%.2f %s",
+                    len(responses), len(exc.partial), exc.expected,
+                    monotonic() - started_at, self.diagnostic_context(),
+                )
                 break
             except TimeoutError:
-                LOGGER.debug("SDG peer data wait timeout chunks=%d", len(responses))
+                # Idle after response chunks is the normal end-of-response delimiter.
+                log = LOGGER.debug if responses else LOGGER.warning
+                log(
+                    "SDG peer timeout phase=%s timeout_s=%.2f chunks=%d elapsed_s=%.2f %s",
+                    "response_end" if responses else "first_response", timeout,
+                    len(responses), monotonic() - started_at, self.diagnostic_context(),
+                )
                 break
             header = PacketHeader.parse(frame)
             if header.command != CMD_MESG:
@@ -450,6 +500,8 @@ class GridSession:
             servers = list(DANFOSS_SERVERS)
             random.shuffle(servers)
             for endpoint in servers:
+                started_at = monotonic()
+                phase = "tcp_connect"
                 try:
                     LOGGER.debug("SDG connect grid host=%s port=%d", endpoint.host, endpoint.port)
                     reader, writer = await asyncio.open_connection(endpoint.host, endpoint.port)
@@ -461,12 +513,17 @@ class GridSession:
                         mode=MODE_GRID,
                         protocol="grid",
                     )
+                    phase = "handshake"
                     await conn.run_handshake()
                     self._grid_conn = conn
-                    LOGGER.debug("SDG grid connected host=%s port=%d", endpoint.host, endpoint.port)
+                    LOGGER.info("SDG grid connected host=%s port=%d", endpoint.host, endpoint.port)
                     return
                 except Exception as exc:  # pragma: no cover - network dependent
-                    LOGGER.debug("SDG grid connect failed host=%s port=%d error=%r", endpoint.host, endpoint.port, exc)
+                    LOGGER.warning(
+                        "SDG grid connect failed host=%s port=%d phase=%s elapsed_s=%.2f error=%s errno=%s",
+                        endpoint.host, endpoint.port, phase, monotonic() - started_at,
+                        type(exc).__name__, getattr(exc, "errno", None),
+                    )
                     last_error = exc
             if last_error is not None:
                 raise last_error
@@ -518,8 +575,12 @@ class GridSession:
                                 self._grid_conn._pending_reply = None
                                 LOGGER.debug("SDG peer request done id=%d result=%d peer=%s", request_id, reply.result, reply.peer)
                                 return reply
-                    except (asyncio.IncompleteReadError, ConnectionError, OSError):
-                        LOGGER.debug("SDG peer request retry after grid disconnect id=%d", request_id, exc_info=True)
+                    except (asyncio.IncompleteReadError, ConnectionError, OSError) as exc:
+                        LOGGER.warning(
+                            "SDG grid request failed id=%d attempt=%d error=%s errno=%s %s",
+                            request_id, attempt + 1, type(exc).__name__, getattr(exc, "errno", None),
+                            self._grid_conn.diagnostic_context(),
+                        )
                         await self._reset_grid_connection()
                         if attempt == 1:
                             raise
@@ -536,6 +597,7 @@ class GridSession:
             control.encode_connect_to_peer(request_id, peer_id_hex, protocol),
         )
         if reply.result or reply.peer is None:
+            LOGGER.warning("SDG remote connection refused peer=%s result=%d has_peer=%s", peer_id_hex, reply.result, reply.peer is not None)
             raise SDGProtocolError("remote connection refused")
         LOGGER.debug("SDG remote tunnel host=%s port=%d peer=%s", reply.peer.server.host, reply.peer.server.port, reply.peer.peer_id)
         reader, writer = await asyncio.open_connection(reply.peer.server.host, reply.peer.server.port)
