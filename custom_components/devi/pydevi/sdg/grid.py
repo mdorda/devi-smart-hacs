@@ -119,9 +119,12 @@ class _RemoteConnection:
 
     async def close(self) -> None:
         LOGGER.debug("SDG close mode=%s protocol=%s peer_id=%s", self.mode, self.protocol, self.peer_id_hex)
-        self.writer.close()
-        await self.writer.wait_closed()
         self.connected = False
+        self.writer.close()
+        try:
+            await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+        except (OSError, TimeoutError):
+            LOGGER.debug("SDG ignore transport error during close", exc_info=True)
 
     async def send_raw(self, payload: bytes) -> None:
         self.writer.write(payload)
