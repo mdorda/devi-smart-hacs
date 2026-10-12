@@ -16,6 +16,7 @@ class PeerSession:
         self.protocol = protocol
         self._connection = None
         self._op_lock = asyncio.Lock()
+        self._connections = 0
 
     @property
     def connected(self) -> bool:
@@ -23,6 +24,10 @@ class PeerSession:
 
     async def connect(self) -> None:
         if self._connection is None or not self._connection.connected:
+            LOGGER.debug(
+                "DEVI peer connecting peer=%s reason=%s",
+                self.peer_id, "initial" if self._connections == 0 else "reconnect",
+            )
             started_at = monotonic()
             try:
                 self._connection = await self.grid.connect_to_remote(self.peer_id, self.protocol)
@@ -32,11 +37,23 @@ class PeerSession:
                     self.peer_id, monotonic() - started_at, type(exc).__name__, getattr(exc, "errno", None),
                 )
                 raise
-            LOGGER.info("DEVI peer connected peer=%s elapsed_s=%.2f", self.peer_id, monotonic() - started_at)
+            self._connections += 1
+            start_monitor = getattr(self._connection, "start_monitor", None)
+            if start_monitor is not None:
+                start_monitor()
+            LOGGER.info(
+                "DEVI peer connected peer=%s connection_no=%d elapsed_s=%.2f",
+                self.peer_id, self._connections, monotonic() - started_at,
+            )
 
     async def disconnect(self) -> None:
         connection, self._connection = self._connection, None
         if connection is not None:
+            diagnostic_context = getattr(connection, "diagnostic_context", None)
+            LOGGER.debug(
+                "DEVI peer discard connection peer=%s %s",
+                self.peer_id, diagnostic_context() if diagnostic_context is not None else "",
+            )
             try:
                 await connection.close()
             except (OSError, TimeoutError):

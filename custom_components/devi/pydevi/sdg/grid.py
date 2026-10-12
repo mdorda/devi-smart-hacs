@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 import json
 import logging
 import random
+import socket
 import struct
+import sys
 from time import monotonic
 
 from ..models import HouseConfig, ThermostatInfo
@@ -63,6 +65,84 @@ SYSTEM_ROOM_NAME = 29250
 SYSTEM_HOUSE_NAME = 29251
 SYSTEM_ZONE_NAME = 29252
 
+# Connection monitor: nothing reads a socket between requests, so without it a remote close
+# or unsolicited data is only noticed at the next use, hours later.
+MONITOR_INTERVAL_S = 5.0
+MONITOR_HEARTBEAT_S = 300.0
+MONITOR_STUCK_OPERATION_S = 30.0
+
+# struct tcp_info of linux/tcp.h up to tcpi_rttvar: 8 x u8, 17 x u32.
+_TCP_INFO_FORMAT = "<8B17I"
+_TCP_STATES = {
+    1: "ESTABLISHED",
+    2: "SYN_SENT",
+    3: "SYN_RECV",
+    4: "FIN_WAIT1",
+    5: "FIN_WAIT2",
+    6: "TIME_WAIT",
+    7: "CLOSE",
+    8: "CLOSE_WAIT",
+    9: "LAST_ACK",
+    10: "LISTEN",
+    11: "CLOSING",
+}
+
+
+def _tcp_diagnostics(sock) -> str:
+    """Kernel view of a TCP connection (Linux only), independent of what the application has read."""
+    if sock is None or not sys.platform.startswith("linux") or not hasattr(socket, "TCP_INFO"):
+        return "tcp=n/a"
+    try:
+        raw = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, struct.calcsize(_TCP_INFO_FORMAT))
+        info = struct.unpack_from(_TCP_INFO_FORMAT, raw)
+    except (OSError, TypeError, ValueError, struct.error):
+        return "tcp=n/a"
+    return (
+        f"tcp_state={_TCP_STATES.get(info[0], info[0])} "
+        f"tcp_last_recv_ms={info[19]} tcp_last_send_ms={info[17]} tcp_last_ack_recv_ms={info[20]} "
+        f"tcp_unacked={info[12]} tcp_retransmits={info[2]} tcp_probes={info[3]} tcp_backoff={info[4]} "
+        f"tcp_retrans={info[15]} tcp_rtt_ms={info[23] / 1000:.1f}"
+    )
+
+
+def _packet_ids(packets: list[DominionPacket]) -> list[str]:
+    """Dominion packet identifiers (class:code) for diagnostics, without values."""
+    return [f"{packet.msg_class}:{packet.msg_code}" for packet in packets]
+
+
+# Longer payloads are strings and arrays (names, Wi-Fi credentials, keys); only their length is logged.
+_MAX_LOGGED_PAYLOAD_BYTES = 8
+# Pushed by the thermostat every second (clock and a counter); their values change in every chunk.
+_TICKER_PACKET_IDS = frozenset({"5:29237", "5:29264"})
+
+
+def _is_identifying_packet(packet: DominionPacket) -> bool:
+    return (packet.msg_class, packet.msg_code) == (DEVICEGLOBAL, GLOBAL_SERIALNUMBER) or packet.msg_code in (
+        SYSTEM_ROOM_NAME, SYSTEM_HOUSE_NAME, SYSTEM_ZONE_NAME,
+    )
+
+
+def _packet_value(packet: DominionPacket) -> str:
+    if _is_identifying_packet(packet):
+        return "redacted"
+    if len(packet.payload) > _MAX_LOGGED_PAYLOAD_BYTES:
+        return f"len{len(packet.payload)}"
+    return packet.payload.hex()
+
+
+def _response_packets(data: bytes) -> tuple[list[str], str, str]:
+    """Packet identifiers, an id=value description and a key for deduplicating repeated chunks."""
+    try:
+        packets = DominionPacket.parse_stream(data)
+    except (ValueError, struct.error):
+        return ["unparsed"], f"unparsed_len={len(data)}", f"unparsed_len={len(data)}"
+    ids = _packet_ids(packets)
+    values = [f"{packet_id}={_packet_value(packet)}" for packet_id, packet in zip(ids, packets)]
+    dedup_key = ",".join(
+        packet_id if packet_id in _TICKER_PACKET_IDS else value for packet_id, value in zip(ids, values)
+    )
+    return ids, ",".join(values), dedup_key
+
 
 class SDGProtocolError(RuntimeError):
     pass
@@ -102,6 +182,9 @@ class _RemoteConnection:
     _last_tx_at: float | None = None
     _rx_frames: int = 0
     _tx_frames: int = 0
+    _busy_since: float | None = None
+    _busy_operation: str | None = None
+    _monitor_task: asyncio.Task | None = None
 
     def __post_init__(self) -> None:
         self.client_temp_public_key = b""
@@ -134,11 +217,99 @@ class _RemoteConnection:
             f"age_s={now - self._created_at:.1f} "
             f"rx_idle_s={rx_idle} tx_idle_s={tx_idle} "
             f"rx_frames={self._rx_frames} tx_frames={self._tx_frames} "
-            f"closing={self.writer.is_closing()} eof={self.reader.at_eof()}"
+            f"rx_buffer={self._rx_buffered()} busy={self._busy_operation} "
+            f"closing={self.writer.is_closing()} eof={self._remote_closed()} "
+            f"reader_error={self._reader_error()} "
+            f"{_tcp_diagnostics(self.writer.get_extra_info('socket'))}"
         )
 
+    def _rx_buffered(self) -> int:
+        """Bytes received by the transport but not read by the application yet."""
+        buffer = getattr(self.reader, "_buffer", None)
+        return len(buffer) if isinstance(buffer, (bytes, bytearray)) else 0
+
+    def _remote_closed(self) -> bool:
+        """Whether the remote side has closed the stream, also while unread data is still buffered."""
+        eof = getattr(self.reader, "_eof", None)
+        return eof if isinstance(eof, bool) else bool(self.reader.at_eof())
+
+    def _reader_error(self) -> str | None:
+        """The error the transport was lost with (e.g. a reset), None for a clean close."""
+        try:
+            exc = self.reader.exception()
+        except Exception:  # pragma: no cover - defensive, diagnostics only
+            return None
+        if not isinstance(exc, BaseException):
+            return None
+        return f"{type(exc).__name__}(errno={getattr(exc, 'errno', None)})"
+
+    def _mark_busy(self, operation: str) -> None:
+        self._busy_since = monotonic()
+        self._busy_operation = operation
+
+    def _mark_idle(self) -> None:
+        self._busy_since = None
+        self._busy_operation = None
+
+    def start_monitor(self) -> None:
+        if self._monitor_task is None:
+            self._monitor_task = asyncio.get_running_loop().create_task(self._monitor())
+
+    def stop_monitor(self) -> None:
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            self._monitor_task = None
+
+    async def run_monitored_handshake(self, operation: str) -> None:
+        """Handshake reads have no timeout; monitor it so a hang is reported as a stuck operation."""
+        self.start_monitor()
+        self._mark_busy(operation)
+        try:
+            await self.run_handshake()
+        except BaseException:
+            self.stop_monitor()
+            raise
+        finally:
+            self._mark_idle()
+
+    async def _monitor(self) -> None:
+        """Log what happens to the connection while nothing reads it, without consuming any data."""
+        reported_close = False
+        reported_stuck_since: float | None = None
+        reported_unread = False
+        last_heartbeat = monotonic()
+        LOGGER.debug("SDG monitor started %s", self.diagnostic_context())
+        while True:
+            await asyncio.sleep(MONITOR_INTERVAL_S)
+            now = monotonic()
+            closed = self._remote_closed() or self.writer.is_closing() or self._reader_error() is not None
+            if closed and not reported_close:
+                reported_close = True
+                LOGGER.warning("SDG monitor detected closed connection %s", self.diagnostic_context())
+            buffered = self._rx_buffered()
+            # Once per idle period; the total shows up as buffered_before of the next request.
+            if self._busy_since is not None:
+                reported_unread = False
+            elif buffered and not reported_unread:
+                reported_unread = True
+                LOGGER.debug("SDG monitor unread data while idle bytes=%d %s", buffered, self.diagnostic_context())
+            if (
+                self._busy_since is not None
+                and now - self._busy_since > MONITOR_STUCK_OPERATION_S
+                and reported_stuck_since != self._busy_since
+            ):
+                reported_stuck_since = self._busy_since
+                LOGGER.warning(
+                    "SDG monitor operation stuck operation=%s busy_s=%.1f %s",
+                    self._busy_operation, now - self._busy_since, self.diagnostic_context(),
+                )
+            if now - last_heartbeat >= MONITOR_HEARTBEAT_S:
+                last_heartbeat = now
+                LOGGER.debug("SDG monitor heartbeat %s", self.diagnostic_context())
+
     async def close(self) -> None:
-        LOGGER.debug("SDG close mode=%s protocol=%s peer_id=%s", self.mode, self.protocol, self.peer_id_hex)
+        LOGGER.debug("SDG close mode=%s protocol=%s peer_id=%s %s", self.mode, self.protocol, self.peer_id_hex, self.diagnostic_context())
+        self.stop_monitor()
         self.connected = False
         self.writer.close()
         try:
@@ -405,7 +576,11 @@ class _RemoteConnection:
             self.connected = True
 
     async def send_peer_data(self, payload: bytes) -> None:
-        await self._send_mesg_data(payload)
+        self._mark_busy("peer_send")
+        try:
+            await self._send_mesg_data(payload)
+        finally:
+            self._mark_idle()
 
     async def _send_mesg_data(self, payload: bytes) -> None:
         data_packet = struct.pack(">H", len(payload)) + payload
@@ -420,15 +595,39 @@ class _RemoteConnection:
         first_chunk_timeout: float = 5.0,
         idle_timeout: float = 1.0,
     ) -> list[bytes]:
+        self._mark_busy("peer_request")
+        try:
+            return await self._request_peer_data(payload, first_chunk_timeout, idle_timeout)
+        finally:
+            self._mark_idle()
+
+    async def _request_peer_data(self, payload: bytes, first_chunk_timeout: float, idle_timeout: float) -> list[bytes]:
+        # Data buffered before the request is not a reply to it, but it is read as one.
+        buffered_before = self._rx_buffered()
+        try:
+            requested = set(_packet_ids(GridSession._parse_dominion_wire_stream(payload)))
+        except (ValueError, struct.error):
+            requested = set()
         LOGGER.debug(
-            "SDG request peer data payload_len=%d first_chunk_timeout=%.2f idle_timeout=%.2f",
+            "SDG request peer data payload_len=%d first_chunk_timeout=%.2f idle_timeout=%.2f buffered_before=%d requested=%d",
             len(payload),
             first_chunk_timeout,
             idle_timeout,
+            buffered_before,
+            len(requested),
         )
         started_at = monotonic()
         await self._send_mesg_data(payload)
         responses: list[bytes] = []
+        # Diagnostics only: how long until every requested packet arrived, and what arrives unasked.
+        read_bytes = 0
+        buffered_chunks = 0
+        answered: set[str] = set()
+        all_answered: str | None = None
+        unsolicited: dict[str, int] = {}
+        # The peer streams the same packets nonstop; log each distinct chunk once per request.
+        logged_chunks: set[str] = set()
+        repeated_chunks = 0
         while True:
             try:
                 timeout = first_chunk_timeout if not responses else idle_timeout
@@ -449,6 +648,8 @@ class _RemoteConnection:
                     len(responses), monotonic() - started_at, self.diagnostic_context(),
                 )
                 break
+            read_bytes += len(frame)
+            from_buffer = read_bytes <= buffered_before
             header = PacketHeader.parse(frame)
             if header.command != CMD_MESG:
                 LOGGER.debug("SDG ignore non-MESG command=%s while waiting peer data", header.command.decode())
@@ -460,7 +661,32 @@ class _RemoteConnection:
                 data = data[self._discard_first_bytes :]
                 self._discard_first_bytes = 0
             responses.append(data)
-            LOGGER.debug("SDG peer data chunk len=%d chunks=%d", len(data), len(responses))
+            packet_ids, packet_values, dedup_key = _response_packets(data)
+            buffered_chunks += from_buffer
+            for packet_id in packet_ids:
+                if packet_id in requested and not from_buffer:
+                    answered.add(packet_id)
+                else:
+                    unsolicited[packet_id] = unsolicited.get(packet_id, 0) + 1
+            if all_answered is None and requested and answered >= requested:
+                all_answered = f"{monotonic() - started_at:.2f}@chunk{len(responses)}"
+            if dedup_key in logged_chunks:
+                repeated_chunks += 1
+            else:
+                logged_chunks.add(dedup_key)
+                LOGGER.debug(
+                    "SDG peer data chunk len=%d chunks=%d buffered=%s packets=%s",
+                    len(data), len(responses), from_buffer, packet_values,
+                )
+        LOGGER.debug(
+            "SDG peer data done chunks=%d repeated_chunks=%d bytes=%d elapsed_s=%.2f buffered_chunks=%d requested=%d answered=%d "
+            "all_answered=%s missing=%s unsolicited=%s %s",
+            len(responses), repeated_chunks, sum(len(chunk) for chunk in responses), monotonic() - started_at,
+            buffered_chunks, len(requested), len(answered), all_answered,
+            ",".join(sorted(requested - answered)) or "none",
+            ",".join(f"{packet_id}x{count}" for packet_id, count in sorted(unsolicited.items(), key=lambda item: -item[1])) or "none",
+            self.diagnostic_context(),
+        )
         return responses
 
 
@@ -474,6 +700,7 @@ class GridSession:
         self._lingering_config_conns: list[_RemoteConnection] = []
         self._connect_lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
+        self._grid_connections = 0
 
     @property
     def private_key_hex(self) -> str:
@@ -514,9 +741,13 @@ class GridSession:
                         protocol="grid",
                     )
                     phase = "handshake"
-                    await conn.run_handshake()
+                    await conn.run_monitored_handshake("grid_handshake")
                     self._grid_conn = conn
-                    LOGGER.info("SDG grid connected host=%s port=%d", endpoint.host, endpoint.port)
+                    self._grid_connections += 1
+                    LOGGER.info(
+                        "SDG grid connected host=%s port=%d connection_no=%d elapsed_s=%.2f",
+                        endpoint.host, endpoint.port, self._grid_connections, monotonic() - started_at,
+                    )
                     return
                 except Exception as exc:  # pragma: no cover - network dependent
                     LOGGER.warning(
@@ -540,6 +771,7 @@ class GridSession:
 
     async def _reset_grid_connection(self) -> None:
         if self._grid_conn is not None:
+            LOGGER.debug("SDG reset grid connection %s", self._grid_conn.diagnostic_context())
             try:
                 await self._grid_conn.close()
             except Exception:
@@ -551,19 +783,24 @@ class GridSession:
             try:
                 for attempt in range(2):
                     await self.connect()
+                    grid_conn = self._grid_conn
+                    # Data buffered before the request was sent by the server while the connection was idle.
                     LOGGER.debug(
-                        "SDG peer request id=%d type=%d payload_len=%d attempt=%d",
+                        "SDG peer request id=%d type=%d payload_len=%d attempt=%d buffered_before=%d",
                         request_id,
                         msg_type,
                         len(payload),
                         attempt + 1,
+                        grid_conn._rx_buffered(),
                     )
+                    grid_conn._mark_busy("grid_request")
                     try:
                         await self._grid_conn._send_mesg(msg_type, payload)
                         while True:
                             frame = await self._grid_conn.read_frame()
                             header = PacketHeader.parse(frame)
                             if header.command != CMD_MESG:
+                                LOGGER.debug("SDG ignore non-MESG command=%r while waiting grid reply", header.command)
                                 continue
                             mesg = self._grid_conn._decrypt_mesg(frame[10:], b"CurveCP-server-M")
                             data_size = struct.unpack(">H", mesg[:2])[0]
@@ -584,6 +821,8 @@ class GridSession:
                         await self._reset_grid_connection()
                         if attempt == 1:
                             raise
+                    finally:
+                        grid_conn._mark_idle()
             finally:
                 self._pending_request_ids.discard(request_id)
 
@@ -612,7 +851,7 @@ class GridSession:
             tunnel_id=reply.peer.tunnel_id,
         )
         conn.server_public_key = bytes.fromhex(reply.peer.peer_id)
-        await conn.run_handshake()
+        await conn.run_monitored_handshake("peer_handshake")
         LOGGER.debug("SDG remote connected peer=%s protocol=%s", reply.peer.peer_id, protocol)
         return conn
 
