@@ -8,6 +8,10 @@ from .grid import GridSession, SDGProtocolError
 
 LOGGER = logging.getLogger(__name__)
 
+# Last resort above the per-step network timeouts in grid.py, which bound one operation including
+# a full reconnect to roughly 170 s; whatever is left over is discarded so the next operation starts clean.
+OPERATION_TIMEOUT_S = 180.0
+
 
 class PeerSession:
     def __init__(self, grid: GridSession, peer_id: str, protocol: str = "dominion-1.0") -> None:
@@ -61,7 +65,7 @@ class PeerSession:
 
     async def send(self, payload: bytes) -> None:
         async with self._op_lock:
-            await self._run_with_reconnect(lambda: self._connection.send_peer_data(payload), operation="send")
+            await self._run_bounded(lambda: self._connection.send_peer_data(payload), operation="send")
 
     async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:
         async with self._op_lock:
@@ -79,7 +83,27 @@ class PeerSession:
                     raise SDGProtocolError("peer returned no response")
                 return responses
 
-            return await self._run_with_reconnect(read_response, operation="request")
+            return await self._run_bounded(read_response, operation="request")
+
+    async def _run_bounded(self, action, operation: str):
+        started_at = monotonic()
+        deadline = asyncio.timeout(OPERATION_TIMEOUT_S)
+        try:
+            async with deadline:
+                return await self._run_with_reconnect(action, operation)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            LOGGER.warning(
+                "DEVI peer operation timeout peer=%s operation=%s timeout_s=%.0f elapsed_s=%.2f",
+                self.peer_id, operation, OPERATION_TIMEOUT_S, monotonic() - started_at,
+            )
+            # A cancelled read may stop mid-frame, so neither connection can be trusted any more.
+            await self.disconnect()
+            reset_grid = getattr(self.grid, "disconnect", None)
+            if reset_grid is not None:
+                await reset_grid()
+            raise
 
     async def _run_with_reconnect(self, action, operation: str):
         for attempt in range(2):

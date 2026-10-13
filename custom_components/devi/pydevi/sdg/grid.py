@@ -74,6 +74,13 @@ MONITOR_STUCK_OPERATION_S = 30.0
 # Upper bound for a request that ends once every requested packet arrived; answers take ~0.2 s.
 RESPONSE_MAX_DURATION_S = 10.0
 
+# Every network wait is bounded, so a reconnect can fail but never hang. Observed durations are far
+# below: TCP connect ~40 ms, handshake ~0.3 s (grid) and ~1.3 s (peer tunnel), grid reply ~50 ms.
+CONNECT_TIMEOUT_S = 10.0
+HANDSHAKE_TIMEOUT_S = 15.0
+GRID_REPLY_TIMEOUT_S = 10.0
+WRITE_TIMEOUT_S = 10.0
+
 # struct tcp_info of linux/tcp.h up to tcpi_rttvar: 8 x u8, 17 x u32.
 _TCP_INFO_FORMAT = "<8B17I"
 _TCP_STATES = {
@@ -264,13 +271,21 @@ class _RemoteConnection:
             self._monitor_task = None
 
     async def run_monitored_handshake(self, operation: str) -> None:
-        """Handshake reads have no timeout; monitor it so a hang is reported as a stuck operation."""
+        """Run the handshake with a timeout; a failed handshake closes the socket."""
         self.start_monitor()
         self._mark_busy(operation)
+        started_at = monotonic()
         try:
-            await self.run_handshake()
-        except BaseException:
+            await asyncio.wait_for(self.run_handshake(), HANDSHAKE_TIMEOUT_S)
+        except BaseException as exc:
+            if isinstance(exc, TimeoutError):
+                LOGGER.warning(
+                    "SDG handshake timeout operation=%s timeout_s=%.1f elapsed_s=%.2f %s",
+                    operation, HANDSHAKE_TIMEOUT_S, monotonic() - started_at, self.diagnostic_context(),
+                )
             self.stop_monitor()
+            self.connected = False
+            self.writer.close()
             raise
         finally:
             self._mark_idle()
@@ -323,7 +338,7 @@ class _RemoteConnection:
     async def send_raw(self, payload: bytes) -> None:
         try:
             self.writer.write(payload)
-            await self.writer.drain()
+            await asyncio.wait_for(self.writer.drain(), WRITE_TIMEOUT_S)
         except OSError as exc:
             LOGGER.warning(
                 "SDG write failed error=%s errno=%s bytes=%d %s",
@@ -764,7 +779,9 @@ class GridSession:
                 phase = "tcp_connect"
                 try:
                     LOGGER.debug("SDG connect grid host=%s port=%d", endpoint.host, endpoint.port)
-                    reader, writer = await asyncio.open_connection(endpoint.host, endpoint.port)
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(endpoint.host, endpoint.port), CONNECT_TIMEOUT_S,
+                    )
                     conn = _RemoteConnection(
                         reader=reader,
                         writer=writer,
@@ -828,23 +845,9 @@ class GridSession:
                     )
                     grid_conn._mark_busy("grid_request")
                     try:
-                        await self._grid_conn._send_mesg(msg_type, payload)
-                        while True:
-                            frame = await self._grid_conn.read_frame()
-                            header = PacketHeader.parse(frame)
-                            if header.command != CMD_MESG:
-                                LOGGER.debug("SDG ignore non-MESG command=%r while waiting grid reply", header.command)
-                                continue
-                            mesg = self._grid_conn._decrypt_mesg(frame[10:], b"CurveCP-server-M")
-                            data_size = struct.unpack(">H", mesg[:2])[0]
-                            data_type = mesg[2]
-                            data = mesg[3 : 3 + data_size - 1]
-                            await self._grid_conn._handle_grid_message(data_type, data)
-                            reply = getattr(self._grid_conn, "_pending_reply", None)
-                            if reply is not None and reply.id == request_id:
-                                self._grid_conn._pending_reply = None
-                                LOGGER.debug("SDG peer request done id=%d result=%d peer=%s", request_id, reply.result, reply.peer)
-                                return reply
+                        await grid_conn._send_mesg(msg_type, payload)
+                        # A timeout is an OSError, so it resets the grid connection and retries like a drop.
+                        return await asyncio.wait_for(self._read_grid_reply(grid_conn, request_id), GRID_REPLY_TIMEOUT_S)
                     except (asyncio.IncompleteReadError, ConnectionError, OSError) as exc:
                         LOGGER.warning(
                             "SDG grid request failed id=%d attempt=%d error=%s errno=%s %s",
@@ -859,6 +862,24 @@ class GridSession:
             finally:
                 self._pending_request_ids.discard(request_id)
 
+    async def _read_grid_reply(self, grid_conn: _RemoteConnection, request_id: int) -> PeerReply:
+        while True:
+            frame = await grid_conn.read_frame()
+            header = PacketHeader.parse(frame)
+            if header.command != CMD_MESG:
+                LOGGER.debug("SDG ignore non-MESG command=%r while waiting grid reply", header.command)
+                continue
+            mesg = grid_conn._decrypt_mesg(frame[10:], b"CurveCP-server-M")
+            data_size = struct.unpack(">H", mesg[:2])[0]
+            data_type = mesg[2]
+            data = mesg[3 : 3 + data_size - 1]
+            await grid_conn._handle_grid_message(data_type, data)
+            reply = getattr(grid_conn, "_pending_reply", None)
+            if reply is not None and reply.id == request_id:
+                grid_conn._pending_reply = None
+                LOGGER.debug("SDG peer request done id=%d result=%d peer=%s", request_id, reply.result, reply.peer)
+                return reply
+
     async def connect_to_remote(self, peer_id_hex: str, protocol: str = "dominion-1.0") -> _RemoteConnection:
         await self.connect()
         request_id = self._allocate_request_id()
@@ -872,7 +893,18 @@ class GridSession:
             LOGGER.warning("SDG remote connection refused peer=%s result=%d has_peer=%s", peer_id_hex, reply.result, reply.peer is not None)
             raise SDGProtocolError("remote connection refused")
         LOGGER.debug("SDG remote tunnel host=%s port=%d peer=%s", reply.peer.server.host, reply.peer.server.port, reply.peer.peer_id)
-        reader, writer = await asyncio.open_connection(reply.peer.server.host, reply.peer.server.port)
+        started_at = monotonic()
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(reply.peer.server.host, reply.peer.server.port), CONNECT_TIMEOUT_S,
+            )
+        except OSError as exc:
+            LOGGER.warning(
+                "SDG remote tunnel connect failed host=%s port=%d elapsed_s=%.2f error=%s errno=%s",
+                reply.peer.server.host, reply.peer.server.port, monotonic() - started_at,
+                type(exc).__name__, getattr(exc, "errno", None),
+            )
+            raise
         conn = _RemoteConnection(
             reader=reader,
             writer=writer,
