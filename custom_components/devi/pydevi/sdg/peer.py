@@ -66,11 +66,15 @@ class PeerSession:
     async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:
         async with self._op_lock:
             async def read_response():
-                responses = await self._connection.request_peer_data(
+                connection = self._connection
+                responses = await connection.request_peer_data(
                     payload,
                     first_chunk_timeout=timeout,
                     idle_timeout=min(timeout, 1.0),
+                    stop_when_answered=True,
                 )
+                if not connection.connected:
+                    raise SDGProtocolError("peer closed connection during request")
                 if not responses:
                     raise SDGProtocolError("peer returned no response")
                 return responses

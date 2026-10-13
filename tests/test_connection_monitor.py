@@ -127,7 +127,9 @@ class FakeConnection:
     async def close(self) -> None:
         self.connected = False
 
-    async def request_peer_data(self, payload: bytes, first_chunk_timeout: float, idle_timeout: float) -> list[bytes]:
+    async def request_peer_data(
+        self, payload: bytes, first_chunk_timeout: float, idle_timeout: float, stop_when_answered: bool = False,
+    ) -> list[bytes]:
         return [b"ok"]
 
 

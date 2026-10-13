@@ -71,6 +71,9 @@ MONITOR_INTERVAL_S = 5.0
 MONITOR_HEARTBEAT_S = 300.0
 MONITOR_STUCK_OPERATION_S = 30.0
 
+# Upper bound for a request that ends once every requested packet arrived; answers take ~0.2 s.
+RESPONSE_MAX_DURATION_S = 10.0
+
 # struct tcp_info of linux/tcp.h up to tcpi_rttvar: 8 x u8, 17 x u32.
 _TCP_INFO_FORMAT = "<8B17I"
 _TCP_STATES = {
@@ -594,14 +597,23 @@ class _RemoteConnection:
         payload: bytes,
         first_chunk_timeout: float = 5.0,
         idle_timeout: float = 1.0,
+        stop_when_answered: bool = False,
     ) -> list[bytes]:
+        """Send a request and collect the chunks that follow.
+
+        The thermostat pushes its clock every second, so idle time alone rarely ends a response.
+        With stop_when_answered the request ends once every requested Dominion packet has arrived,
+        or after RESPONSE_MAX_DURATION_S.
+        """
         self._mark_busy("peer_request")
         try:
-            return await self._request_peer_data(payload, first_chunk_timeout, idle_timeout)
+            return await self._request_peer_data(payload, first_chunk_timeout, idle_timeout, stop_when_answered)
         finally:
             self._mark_idle()
 
-    async def _request_peer_data(self, payload: bytes, first_chunk_timeout: float, idle_timeout: float) -> list[bytes]:
+    async def _request_peer_data(
+        self, payload: bytes, first_chunk_timeout: float, idle_timeout: float, stop_when_answered: bool,
+    ) -> list[bytes]:
         # Data buffered before the request is not a reply to it, but it is read as one.
         buffered_before = self._rx_buffered()
         try:
@@ -617,6 +629,7 @@ class _RemoteConnection:
             len(requested),
         )
         started_at = monotonic()
+        stop_when_answered = stop_when_answered and bool(requested)
         await self._send_mesg_data(payload)
         responses: list[bytes] = []
         # Diagnostics only: how long until every requested packet arrived, and what arrives unasked.
@@ -628,11 +641,26 @@ class _RemoteConnection:
         # The peer streams the same packets nonstop; log each distinct chunk once per request.
         logged_chunks: set[str] = set()
         repeated_chunks = 0
+
+        def log_incomplete() -> None:
+            LOGGER.warning(
+                "SDG peer response incomplete after max_duration_s=%.1f chunks=%d missing=%s %s",
+                RESPONSE_MAX_DURATION_S, len(responses), ",".join(sorted(requested - answered)),
+                self.diagnostic_context(),
+            )
         while True:
+            timeout = first_chunk_timeout if not responses else idle_timeout
+            if stop_when_answered:
+                remaining = RESPONSE_MAX_DURATION_S - (monotonic() - started_at)
+                if remaining <= 0:
+                    log_incomplete()
+                    break
+                timeout = min(timeout, remaining)
             try:
-                timeout = first_chunk_timeout if not responses else idle_timeout
                 frame = await asyncio.wait_for(self.read_frame(), timeout)
             except asyncio.IncompleteReadError as exc:
+                # The remote side closed the tunnel; the connection cannot be used for the next request.
+                self.connected = False
                 LOGGER.warning(
                     "SDG peer EOF chunks=%d partial_bytes=%d expected_bytes=%s elapsed_s=%.2f %s",
                     len(responses), len(exc.partial), exc.expected,
@@ -640,6 +668,9 @@ class _RemoteConnection:
                 )
                 break
             except TimeoutError:
+                if stop_when_answered and monotonic() - started_at >= RESPONSE_MAX_DURATION_S:
+                    log_incomplete()
+                    break
                 # Idle after response chunks is the normal end-of-response delimiter.
                 log = LOGGER.debug if responses else LOGGER.warning
                 log(
@@ -678,6 +709,8 @@ class _RemoteConnection:
                     "SDG peer data chunk len=%d chunks=%d buffered=%s packets=%s",
                     len(data), len(responses), from_buffer, packet_values,
                 )
+            if stop_when_answered and all_answered is not None:
+                break
         LOGGER.debug(
             "SDG peer data done chunks=%d repeated_chunks=%d bytes=%d elapsed_s=%.2f buffered_chunks=%d requested=%d answered=%d "
             "all_answered=%s missing=%s unsolicited=%s %s",

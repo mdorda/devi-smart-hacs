@@ -25,7 +25,9 @@ class FakeConnection:
             self.connected = False
             raise OSError("socket closed")
 
-    async def request_peer_data(self, payload: bytes, first_chunk_timeout: float, idle_timeout: float) -> list[bytes]:
+    async def request_peer_data(
+        self, payload: bytes, first_chunk_timeout: float, idle_timeout: float, stop_when_answered: bool = False,
+    ) -> list[bytes]:
         if self.fail_request_once:
             self.fail_request_once = False
             self.connected = False
