@@ -81,6 +81,10 @@ HANDSHAKE_TIMEOUT_S = 15.0
 GRID_REPLY_TIMEOUT_S = 10.0
 WRITE_TIMEOUT_S = 10.0
 
+# The grid server closes a connection that stays silent (observed after 300 s), so it is pinged like
+# OpenSDG's GridConnection does: the next ping goes out this long after the previous PONG.
+GRID_PING_INTERVAL_S = 30.0
+
 # The thermostat pushes its clock every second; an idle peer tunnel that stays silent longer is dead.
 PEER_SILENCE_WARNING_S = 5.0
 
@@ -782,6 +786,7 @@ class GridSession:
         self._connect_lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
         self._grid_connections = 0
+        self._keepalive_task: asyncio.Task | None = None
 
     @property
     def private_key_hex(self) -> str:
@@ -827,6 +832,7 @@ class GridSession:
                     await conn.run_monitored_handshake("grid_handshake")
                     self._grid_conn = conn
                     self._grid_connections += 1
+                    self._start_keepalive(conn)
                     LOGGER.info(
                         "SDG grid connected host=%s port=%d connection_no=%d elapsed_s=%.2f",
                         endpoint.host, endpoint.port, self._grid_connections, monotonic() - started_at,
@@ -847,12 +853,14 @@ class GridSession:
             lingering = self._lingering_config_conns.pop()
             LOGGER.debug("SDG disconnect lingering config connection")
             await lingering.close()
+        self._stop_keepalive()
         if self._grid_conn is not None:
             LOGGER.debug("SDG disconnect grid")
             await self._grid_conn.close()
             self._grid_conn = None
 
     async def _reset_grid_connection(self) -> None:
+        self._stop_keepalive()
         if self._grid_conn is not None:
             LOGGER.debug("SDG reset grid connection %s", self._grid_conn.diagnostic_context())
             try:
@@ -860,6 +868,50 @@ class GridSession:
             except Exception:
                 LOGGER.debug("SDG ignore grid close error during reset", exc_info=True)
             self._grid_conn = None
+
+    def _start_keepalive(self, grid_conn: _RemoteConnection) -> None:
+        self._stop_keepalive()
+        self._keepalive_task = asyncio.get_running_loop().create_task(self._keepalive(grid_conn))
+
+    def _stop_keepalive(self) -> None:
+        task, self._keepalive_task = self._keepalive_task, None
+        # The keepalive resets a failed connection itself and must not cancel its own cleanup.
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _keepalive(self, grid_conn: _RemoteConnection) -> None:
+        """Ping the grid until it fails; a failed ping drops the connection so the next use reconnects."""
+        while True:
+            await asyncio.sleep(GRID_PING_INTERVAL_S)
+            # Grid requests read the same socket, so a ping must not run in the middle of one.
+            async with self._request_lock:
+                if self._grid_conn is not grid_conn or not grid_conn.connected:
+                    return
+                grid_conn._mark_busy("grid_ping")
+                try:
+                    await asyncio.wait_for(self._ping(grid_conn), GRID_REPLY_TIMEOUT_S)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "SDG grid ping failed seq=%d error=%s errno=%s %s",
+                        grid_conn.ping_sequence - 1, type(exc).__name__, getattr(exc, "errno", None),
+                        grid_conn.diagnostic_context(),
+                    )
+                    await self._reset_grid_connection()
+                    return
+                finally:
+                    grid_conn._mark_idle()
+
+    async def _ping(self, grid_conn: _RemoteConnection) -> None:
+        sequence = grid_conn.ping_sequence
+        started_at = monotonic()
+        await grid_conn._send_ping()
+        while True:
+            msg_type, data = await self._read_grid_message(grid_conn)
+            # A PONG of an earlier ping that timed out is stale; only the current one counts.
+            if msg_type == control.MSG_PONG and control.decode_pong(data) == sequence:
+                grid_conn.ping_delay = round((monotonic() - started_at) * 1000)
+                LOGGER.debug("SDG grid ping roundtrip seq=%d ms=%d", sequence, grid_conn.ping_delay)
+                return
 
     async def _peer_request(self, request_id: int, msg_type: int, payload: bytes) -> PeerReply:
         async with self._request_lock:
@@ -895,7 +947,8 @@ class GridSession:
             finally:
                 self._pending_request_ids.discard(request_id)
 
-    async def _read_grid_reply(self, grid_conn: _RemoteConnection, request_id: int) -> PeerReply:
+    async def _read_grid_message(self, grid_conn: _RemoteConnection) -> tuple[int, bytes]:
+        """Read and handle the next grid message, skipping anything that is not a MESG."""
         while True:
             frame = await grid_conn.read_frame()
             header = PacketHeader.parse(frame)
@@ -907,6 +960,11 @@ class GridSession:
             data_type = mesg[2]
             data = mesg[3 : 3 + data_size - 1]
             await grid_conn._handle_grid_message(data_type, data)
+            return data_type, data
+
+    async def _read_grid_reply(self, grid_conn: _RemoteConnection, request_id: int) -> PeerReply:
+        while True:
+            await self._read_grid_message(grid_conn)
             reply = getattr(grid_conn, "_pending_reply", None)
             if reply is not None and reply.id == request_id:
                 grid_conn._pending_reply = None
