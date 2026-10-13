@@ -81,6 +81,9 @@ HANDSHAKE_TIMEOUT_S = 15.0
 GRID_REPLY_TIMEOUT_S = 10.0
 WRITE_TIMEOUT_S = 10.0
 
+# The thermostat pushes its clock every second; an idle peer tunnel that stays silent longer is dead.
+PEER_SILENCE_WARNING_S = 5.0
+
 # struct tcp_info of linux/tcp.h up to tcpi_rttvar: 8 x u8, 17 x u32.
 _TCP_INFO_FORMAT = "<8B17I"
 _TCP_STATES = {
@@ -140,18 +143,18 @@ def _packet_value(packet: DominionPacket) -> str:
     return packet.payload.hex()
 
 
-def _response_packets(data: bytes) -> tuple[list[str], str, str]:
-    """Packet identifiers, an id=value description and a key for deduplicating repeated chunks."""
+def _response_packets(data: bytes) -> tuple[list[DominionPacket], list[str], str, str]:
+    """Packets, their identifiers, an id=value description and a key for deduplicating repeated chunks."""
     try:
         packets = DominionPacket.parse_stream(data)
     except (ValueError, struct.error):
-        return ["unparsed"], f"unparsed_len={len(data)}", f"unparsed_len={len(data)}"
+        return [], ["unparsed"], f"unparsed_len={len(data)}", f"unparsed_len={len(data)}"
     ids = _packet_ids(packets)
     values = [f"{packet_id}={_packet_value(packet)}" for packet_id, packet in zip(ids, packets)]
     dedup_key = ",".join(
         packet_id if packet_id in _TICKER_PACKET_IDS else value for packet_id, value in zip(ids, values)
     )
-    return ids, ",".join(values), dedup_key
+    return packets, ids, ",".join(values), dedup_key
 
 
 class SDGProtocolError(RuntimeError):
@@ -195,6 +198,7 @@ class _RemoteConnection:
     _busy_since: float | None = None
     _busy_operation: str | None = None
     _monitor_task: asyncio.Task | None = None
+    _known_packets: dict[str, DominionPacket] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.client_temp_public_key = b""
@@ -295,6 +299,9 @@ class _RemoteConnection:
         reported_close = False
         reported_stuck_since: float | None = None
         reported_unread = False
+        reported_silent = False
+        last_buffered = 0
+        last_rx_growth = monotonic()
         last_heartbeat = monotonic()
         LOGGER.debug("SDG monitor started %s", self.diagnostic_context())
         while True:
@@ -311,6 +318,16 @@ class _RemoteConnection:
             elif buffered and not reported_unread:
                 reported_unread = True
                 LOGGER.debug("SDG monitor unread data while idle bytes=%d %s", buffered, self.diagnostic_context())
+            # A live peer tunnel grows the buffer every second while idle; a request drains it.
+            if self._busy_since is not None or buffered != last_buffered:
+                last_buffered = buffered
+                last_rx_growth = now
+                reported_silent = False
+            elif self.mode == MODE_PEER and not reported_silent and now - last_rx_growth >= PEER_SILENCE_WARNING_S:
+                reported_silent = True
+                LOGGER.warning(
+                    "SDG monitor peer silent while idle silent_s=%.1f %s", now - last_rx_growth, self.diagnostic_context(),
+                )
             if (
                 self._busy_since is not None
                 and now - self._busy_since > MONITOR_STUCK_OPERATION_S
@@ -656,6 +673,9 @@ class _RemoteConnection:
         # The peer streams the same packets nonstop; log each distinct chunk once per request.
         logged_chunks: set[str] = set()
         repeated_chunks = 0
+        # Values the answer changed although the thermostat did not push the change: what only polling finds.
+        poll_checked: set[str] = set()
+        poll_changes: list[str] = []
 
         def log_incomplete() -> None:
             LOGGER.warning(
@@ -707,13 +727,23 @@ class _RemoteConnection:
                 data = data[self._discard_first_bytes :]
                 self._discard_first_bytes = 0
             responses.append(data)
-            packet_ids, packet_values, dedup_key = _response_packets(data)
+            packets, packet_ids, packet_values, dedup_key = _response_packets(data)
             buffered_chunks += from_buffer
             for packet_id in packet_ids:
                 if packet_id in requested and not from_buffer:
                     answered.add(packet_id)
                 else:
                     unsolicited[packet_id] = unsolicited.get(packet_id, 0) + 1
+            for packet_id, packet in zip(packet_ids, packets):
+                known = self._known_packets.get(packet_id)
+                if (
+                    packet_id in requested and not from_buffer and packet_id not in poll_checked
+                    and known is not None and known.payload != packet.payload
+                ):
+                    poll_changes.append(f"{packet_id}:{_packet_value(known)}->{_packet_value(packet)}")
+                if packet_id in requested and not from_buffer:
+                    poll_checked.add(packet_id)
+                self._known_packets[packet_id] = packet
             if all_answered is None and requested and answered >= requested:
                 all_answered = f"{monotonic() - started_at:.2f}@chunk{len(responses)}"
             if dedup_key in logged_chunks:
@@ -728,13 +758,16 @@ class _RemoteConnection:
                 break
         LOGGER.debug(
             "SDG peer data done chunks=%d repeated_chunks=%d bytes=%d elapsed_s=%.2f buffered_chunks=%d requested=%d answered=%d "
-            "all_answered=%s missing=%s unsolicited=%s %s",
+            "all_answered=%s missing=%s poll_changes=%s unsolicited=%s %s",
             len(responses), repeated_chunks, sum(len(chunk) for chunk in responses), monotonic() - started_at,
             buffered_chunks, len(requested), len(answered), all_answered,
             ",".join(sorted(requested - answered)) or "none",
+            ",".join(poll_changes) or "none",
             ",".join(f"{packet_id}x{count}" for packet_id, count in sorted(unsolicited.items(), key=lambda item: -item[1])) or "none",
             self.diagnostic_context(),
         )
+        if poll_changes:
+            LOGGER.info("SDG poll found changes the thermostat did not push changes=%s", ",".join(poll_changes))
         return responses
 
 
