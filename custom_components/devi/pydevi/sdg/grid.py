@@ -653,9 +653,10 @@ class _RemoteConnection:
         # Data buffered before the request is not a reply to it, but it is read as one.
         buffered_before = self._rx_buffered()
         try:
-            requested = set(_packet_ids(GridSession._parse_dominion_wire_stream(payload)))
+            requested_order = _packet_ids(GridSession._parse_dominion_wire_stream(payload))
         except (ValueError, struct.error):
-            requested = set()
+            requested_order = []
+        requested = set(requested_order)
         LOGGER.debug(
             "SDG request peer data payload_len=%d first_chunk_timeout=%.2f idle_timeout=%.2f buffered_before=%d requested=%d",
             len(payload),
@@ -678,6 +679,10 @@ class _RemoteConnection:
         logged_chunks: set[str] = set()
         repeated_chunks = 0
         # Values the answer changed although the thermostat did not push the change: what only polling finds.
+        # The answer lists the requested packets in request order. Pushes of requested packets (measurements)
+        # may arrive before it, even in the same chunk, and are not the answer.
+        answer_start = requested_order[:2]
+        answer_started = False
         poll_checked: set[str] = set()
         poll_changes: list[str] = []
 
@@ -738,14 +743,17 @@ class _RemoteConnection:
                     answered.add(packet_id)
                 else:
                     unsolicited[packet_id] = unsolicited.get(packet_id, 0) + 1
-            for packet_id, packet in zip(packet_ids, packets):
+            for index, (packet_id, packet) in enumerate(zip(packet_ids, packets)):
+                if not answer_started and not from_buffer and answer_start:
+                    answer_started = packet_ids[index : index + len(answer_start)] == answer_start
+                in_answer = answer_started and packet_id in requested
                 known = self._known_packets.get(packet_id)
                 if (
-                    packet_id in requested and not from_buffer and packet_id not in poll_checked
+                    in_answer and packet_id not in poll_checked
                     and known is not None and known.payload != packet.payload
                 ):
                     poll_changes.append(f"{packet_id}:{_packet_value(known)}->{_packet_value(packet)}")
-                if packet_id in requested and not from_buffer:
+                if in_answer:
                     poll_checked.add(packet_id)
                 self._known_packets[packet_id] = packet
             if all_answered is None and requested and answered >= requested:
