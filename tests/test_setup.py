@@ -64,6 +64,11 @@ async def test_setup_starts_the_link_without_polling(hass) -> None:
     coordinator = entry.runtime_data.coordinators[PEER_ID]
     assert coordinator.update_interval is None
     assert hass.states.async_entity_ids("climate")
+    connected = [
+        entity_id for entity_id in hass.states.async_entity_ids("binary_sensor") if entity_id.endswith("_connected")
+        and hass.states.get(entity_id).attributes.get("device_class") == "connectivity"
+    ]
+    assert [hass.states.get(entity_id).state for entity_id in connected] == ["on"]
 
 
 async def test_setup_is_retried_when_no_thermostat_sends_its_state(hass) -> None:

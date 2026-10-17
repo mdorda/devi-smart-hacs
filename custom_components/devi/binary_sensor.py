@@ -87,7 +87,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if requires_diagnostics and not diagnostic_enabled:
                 continue
             entities.append(DeviBinarySensorEntity(coordinator, thermostat, description))
+        entities.append(DeviLinkEntity(coordinator, thermostat))
     async_add_entities(entities)
+
+
+class DeviLinkEntity(DeviCoordinatorEntity, BinarySensorEntity):
+    """Whether Home Assistant has a tunnel to the thermostat right now, without the outage grace period."""
+
+    entity_description = BinarySensorEntityDescription(
+        key="link_connected",
+        name="Connected",
+        device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    )
+
+    def __init__(self, coordinator, thermostat) -> None:
+        super().__init__(coordinator, thermostat)
+        self._attr_unique_id = f"{thermostat.peer_id}_{self.entity_description.key}"
+        self._attr_name = f"{thermostat.room_name} {self.entity_description.name}"
+
+    @property
+    def available(self) -> bool:
+        # Reporting a lost connection is this entity's job, so it never becomes unavailable itself.
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.connected
 
 
 class DeviBinarySensorEntity(DeviCoordinatorEntity, BinarySensorEntity):
