@@ -628,6 +628,27 @@ class _RemoteConnection:
         ciphertext = self._encrypt_afternm(message, nonce)
         await self._send_packet(CMD_MESG, nonce[16:24] + ciphertext)
 
+    def _decode_peer_frame(self, frame: bytes) -> bytes | None:
+        """The Dominion data a peer frame carries, None for frames that carry none."""
+        header = PacketHeader.parse(frame)
+        if header.command != CMD_MESG:
+            LOGGER.debug("SDG ignore non-MESG command=%s while waiting peer data", header.command.decode())
+            return None
+        payload_data = self._decrypt_mesg(frame[10:], b"CurveCP-server-M")
+        length = struct.unpack(">H", payload_data[:2])[0]
+        data = payload_data[2 : 2 + length]
+        if self._discard_first_bytes:
+            data = data[self._discard_first_bytes :]
+            self._discard_first_bytes = 0
+        return data
+
+    async def read_peer_chunk(self) -> bytes:
+        """Wait for the next chunk of Dominion data; a remote close raises IncompleteReadError."""
+        while True:
+            data = self._decode_peer_frame(await self.read_frame())
+            if data is not None:
+                return data
+
     async def request_peer_data(
         self,
         payload: bytes,
@@ -725,16 +746,9 @@ class _RemoteConnection:
                 break
             read_bytes += len(frame)
             from_buffer = read_bytes <= buffered_before
-            header = PacketHeader.parse(frame)
-            if header.command != CMD_MESG:
-                LOGGER.debug("SDG ignore non-MESG command=%s while waiting peer data", header.command.decode())
+            data = self._decode_peer_frame(frame)
+            if data is None:
                 continue
-            payload_data = self._decrypt_mesg(frame[10:], b"CurveCP-server-M")
-            length = struct.unpack(">H", payload_data[:2])[0]
-            data = payload_data[2 : 2 + length]
-            if self._discard_first_bytes:
-                data = data[self._discard_first_bytes :]
-                self._discard_first_bytes = 0
             responses.append(data)
             packets, packet_ids, packet_values, dedup_key = _response_packets(data)
             buffered_chunks += from_buffer
