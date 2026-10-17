@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - unittest fallback without HA package
     def async_redact_data(data: Any, to_redact: set[str]) -> Any:
         if isinstance(data, dict):
             return {
-                key: ("REDACTED" if key in to_redact else async_redact_data(value, to_redact))
+                key: ("**REDACTED**" if key in to_redact else async_redact_data(value, to_redact))
                 for key, value in data.items()
             }
         if isinstance(data, list):

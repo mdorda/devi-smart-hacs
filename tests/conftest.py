@@ -4,6 +4,9 @@ from pathlib import Path
 import sys
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 # Make the vendored runtime package importable as top-level `pydevi` for tests.
-VENDORED_RUNTIME_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "devi"
+VENDORED_RUNTIME_ROOT = REPO_ROOT / "custom_components" / "devi"
 sys.path.insert(0, str(VENDORED_RUNTIME_ROOT))
+# Home Assistant side tests import the integration as `custom_components.devi`.
+sys.path.insert(0, str(REPO_ROOT))

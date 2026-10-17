@@ -84,7 +84,7 @@ class DiagnosticsExportTests(unittest.IsolatedAsyncioTestCase):
 
         payload = await async_get_config_entry_diagnostics(hass, entry)
 
-        self.assertEqual(payload["entry"]["data"]["private_key"], "REDACTED")
+        self.assertEqual(payload["entry"]["data"]["private_key"], "**REDACTED**")
         self.assertEqual(payload["entry"]["entry_id"], "entry-1")
         self.assertEqual(payload["integration"]["discovery_session_count"], 1)
         self.assertEqual(payload["runtime"]["grid"]["connected"], True)
@@ -92,7 +92,7 @@ class DiagnosticsExportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("peer-1", payload["runtime"]["clients"])
         self.assertEqual(payload["runtime"]["clients"]["peer-1"]["protocol"], "dominion-1.0")
         self.assertEqual(payload["runtime"]["clients"]["peer-1"]["state"]["room_temperature_c"], 21.5)
-        self.assertEqual(payload["runtime"]["house"]["private_key"], "REDACTED")
+        self.assertEqual(payload["runtime"]["house"]["private_key"], "**REDACTED**")
 
     async def test_diagnostics_handles_missing_runtime_data(self) -> None:
         entry = SimpleNamespace(
@@ -105,7 +105,7 @@ class DiagnosticsExportTests(unittest.IsolatedAsyncioTestCase):
 
         payload = await async_get_config_entry_diagnostics(hass, entry)
 
-        self.assertEqual(payload["entry"]["data"]["private_key"], "REDACTED")
+        self.assertEqual(payload["entry"]["data"]["private_key"], "**REDACTED**")
         self.assertEqual(payload["runtime"], {})
         self.assertEqual(payload["integration"]["discovery_session_count"], 0)
 
