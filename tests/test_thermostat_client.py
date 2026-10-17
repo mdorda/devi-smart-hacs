@@ -31,6 +31,17 @@ class ThermostatClientTest(unittest.IsolatedAsyncioTestCase):
         client.apply_packet(DominionPacket.from_decimal(c.DOMINION_SCHEDULER, c.SCHEDULER_SETPOINT_TEMPORARY, 23.0))
         self.assertEqual(client.state.target_temperature_c, 23.0)
 
+    async def test_current_temperature_follows_the_room(self) -> None:
+        client = ThermostatClient(DummyPeer())
+        # The initial dump sends the floor before the room.
+        client.apply_packet(DominionPacket.from_decimal(c.DOMINION_HEATING, c.HEATING_TEMPERATURE_FLOOR, 19.01))
+        client.apply_packet(DominionPacket.from_decimal(c.DOMINION_HEATING, c.HEATING_TEMPERATURE_ROOM, 23.03))
+        client.apply_packet(DominionPacket.from_decimal(c.DOMINION_HEATING, c.HEATING_TEMPERATURE_ROOM, 23.08))
+        client.apply_packet(DominionPacket.from_decimal(c.DOMINION_HEATING, c.HEATING_TEMPERATURE_FLOOR, 18.98))
+
+        self.assertEqual(client.state.current_temperature_c, 23.08)
+        self.assertEqual(client.state.floor_temperature_c, 18.98)
+
     async def test_alarm_bits(self) -> None:
         client = ThermostatClient(DummyPeer())
         client.apply_packet(DominionPacket.from_byte(c.DOMINION_SYSTEM, c.SYSTEM_ALARM_INFO, c.ALARM_OVERHEAT | c.ALARM_UNRECOVERABLE))

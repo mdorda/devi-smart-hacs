@@ -312,12 +312,10 @@ class ThermostatClient:
         state = self._state
         if packet.msg_code == c.HEATING_TEMPERATURE_ROOM:
             state.room_temperature_c = packet.get_decimal()
-            if state.current_temperature_c is None:
-                state.current_temperature_c = state.room_temperature_c
+            # The climate entity shows the room; the floor has a sensor of its own.
+            state.current_temperature_c = state.room_temperature_c
         elif packet.msg_code == c.HEATING_TEMPERATURE_FLOOR:
             state.floor_temperature_c = packet.get_decimal()
-            if state.current_temperature_c is None:
-                state.current_temperature_c = state.floor_temperature_c
         elif packet.msg_code == c.SYSTEM_HEATING_INFO:
             state.heating_active = packet.get_bool()
         elif packet.msg_code == c.MDG_CONNECTED_TO_SERVER:
