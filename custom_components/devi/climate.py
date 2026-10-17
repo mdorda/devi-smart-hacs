@@ -48,7 +48,7 @@ class DeviClimateEntity(DeviCoordinatorEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        return bool(self.coordinator.data and self.coordinator.data.available)
+        return super().available and bool(self.coordinator.data and self.coordinator.data.available)
 
     @property
     def current_temperature(self) -> float | None:
