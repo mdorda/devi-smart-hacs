@@ -43,7 +43,7 @@ class WriteTimeoutTest(unittest.IsolatedAsyncioTestCase):
     async def test_blocked_write_raises_os_error(self) -> None:
         conn = make_connection()
         conn.writer.drain = hang
-        with patch.object(grid, "WRITE_TIMEOUT_S", 0.05), self.assertLogs(grid.LOGGER, "WARNING"):
+        with patch.object(grid, "WRITE_TIMEOUT_S", 0.05), self.assertLogs(grid.LOGGER, "DEBUG"):
             with self.assertRaises(OSError):
                 await conn.send_raw(b"data")
 

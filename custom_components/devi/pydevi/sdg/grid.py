@@ -344,7 +344,8 @@ class _RemoteConnection:
             self.writer.write(payload)
             await asyncio.wait_for(self.writer.drain(), WRITE_TIMEOUT_S)
         except OSError as exc:
-            LOGGER.warning(
+            # Debug only: every caller reports the failure at the level its consequence deserves.
+            LOGGER.debug(
                 "SDG write failed error=%s errno=%s bytes=%d %s",
                 type(exc).__name__, exc.errno, len(payload), self.diagnostic_context(),
             )
@@ -358,7 +359,8 @@ class _RemoteConnection:
             size = struct.unpack(">H", size_prefix)[0]
             frame = size_prefix + await self.reader.readexactly(size)
         except OSError as exc:
-            LOGGER.warning(
+            # Debug only: a reset tunnel is reported once as "DEVI link lost", grid failures by their callers.
+            LOGGER.debug(
                 "SDG read failed error=%s errno=%s %s",
                 type(exc).__name__, exc.errno, self.diagnostic_context(),
             )
@@ -816,7 +818,7 @@ class GridSession:
                     self._grid_conn = conn
                     self._grid_connections += 1
                     self._start_keepalive(conn)
-                    LOGGER.info(
+                    LOGGER.debug(
                         "SDG grid connected host=%s port=%d connection_no=%d elapsed_s=%.2f",
                         endpoint.host, endpoint.port, self._grid_connections, monotonic() - started_at,
                     )
