@@ -1,11 +1,11 @@
 {
   "domain": "devi",
   "name": "DEVI Smart",
-  "codeowners": ["@karolszpakowski"],
+  "codeowners": ["@mdorda"],
   "config_flow": true,
-  "documentation": "https://github.com/kszpakowski/devi-smart-hacs#readme",
-  "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/kszpakowski/devi-smart-hacs/issues",
+  "documentation": "https://github.com/mdorda/devi-smart-hacs#readme",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/mdorda/devi-smart-hacs/issues",
   "requirements": ["PyNaCl>=1.5.0", "pycryptodome>=3.20.0"],
   "version": "0.1.0"
 }

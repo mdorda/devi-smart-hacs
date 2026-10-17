@@ -24,13 +24,9 @@ from .const import (
     DEFAULT_ENABLE_ADVANCED_ENTITIES,
     DEFAULT_ENABLE_DIAGNOSTIC_ENTITIES,
     DOMAIN,
-    MAX_SCAN_INTERVAL_SECONDS,
-    MIN_SCAN_INTERVAL_SECONDS,
     OPT_ENABLE_ADVANCED_ENTITIES,
     OPT_ENABLE_DIAGNOSTIC_ENTITIES,
-    OPT_SCAN_INTERVAL_SECONDS,
     option_enabled,
-    option_scan_interval_seconds,
 )
 
 
@@ -133,10 +129,6 @@ class DeviOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_ENABLE_DIAGNOSTIC_ENTITIES,
                     ),
                 ): bool,
-                vol.Required(
-                    OPT_SCAN_INTERVAL_SECONDS,
-                    default=option_scan_interval_seconds(options),
-                ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL_SECONDS, max=MAX_SCAN_INTERVAL_SECONDS)),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

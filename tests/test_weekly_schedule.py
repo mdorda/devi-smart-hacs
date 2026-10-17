@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 import unittest
 
 from pydevi.dominion import constants as c
-from pydevi.dominion.client import ThermostatClient
+from pydevi.dominion.client import STATE_PACKET_IDS, ThermostatClient
 from pydevi.dominion.codec import DominionPacket
 from pydevi.models import AwayInterval
 
@@ -21,31 +21,14 @@ def parse_wire_packets(data: bytes) -> list[DominionPacket]:
 class DummyPeer:
     def __init__(self) -> None:
         self.sent_payloads: list[bytes] = []
-        self.request_payloads: list[bytes] = []
-
-    async def connect(self) -> None:
-        return None
-
-    async def disconnect(self) -> None:
-        return None
 
     async def send(self, payload: bytes) -> None:
         self.sent_payloads.append(payload)
 
-    async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:
-        self.request_payloads.append(payload)
-        return []
-
 
 class WeeklyScheduleTest(unittest.IsolatedAsyncioTestCase):
-    async def test_refresh_state_requests_schedule_payloads(self) -> None:
-        peer = DummyPeer()
-        client = ThermostatClient(peer)
-
-        await client.refresh_state()
-
-        packets = parse_wire_packets(peer.request_payloads[0])
-        codes = {packet.msg_code for packet in packets}
+    def test_state_tracks_schedule_payloads(self) -> None:
+        codes = {code for _, code in STATE_PACKET_IDS}
         self.assertIn(c.SCHEDULER_AWAY_ISPLANNED, codes)
         self.assertIn(c.SCHEDULER_AWAY, codes)
         self.assertIn(c.SCHEDULER_WEEK, codes)

@@ -44,7 +44,7 @@ The pairing backend is flaky and pairing codes are effectively single-use. Reusi
 Supported today:
 
 - House discovery during config flow
-- Thermostat polling and state refresh
+- Live state pushed by the thermostat, without polling
 - Target temperature changes
 - Preset and HVAC mode changes
 - Weekly schedule and away interval service support

@@ -22,8 +22,7 @@
         "title": "DEVI Smart options",
         "data": {
           "enable_advanced_entities": "Enable advanced entities",
-          "enable_diagnostic_entities": "Enable diagnostic entities",
-          "scan_interval_seconds": "Polling interval (seconds)"
+          "enable_diagnostic_entities": "Enable diagnostic entities"
         }
       }
     }

@@ -66,8 +66,6 @@ class DeviAwayDateTimeEntity(DeviCoordinatorEntity, DateTimeEntity):
             away = AwayInterval(start=current.start, end=value)
         if away.start and away.end and away.start >= away.end:
             raise ValueError("away start must be before away end")
-        await self.coordinator.client.set_away_interval(
-            away,
-            is_planned=bool(self.coordinator.client.state.away_planned),
+        await self.coordinator.async_command(
+            self.coordinator.client.set_away_interval(away, is_planned=bool(self.coordinator.client.state.away_planned))
         )
-        await self.coordinator.async_request_refresh()

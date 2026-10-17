@@ -85,9 +85,6 @@ WRITE_TIMEOUT_S = 10.0
 # OpenSDG's GridConnection does: the next ping goes out this long after the previous PONG.
 GRID_PING_INTERVAL_S = 30.0
 
-# The thermostat pushes its clock every second; an idle peer tunnel that stays silent longer is dead.
-PEER_SILENCE_WARNING_S = 5.0
-
 # struct tcp_info of linux/tcp.h up to tcpi_rttvar: 8 x u8, 17 x u32.
 _TCP_INFO_FORMAT = "<8B17I"
 _TCP_STATES = {
@@ -202,7 +199,6 @@ class _RemoteConnection:
     _busy_since: float | None = None
     _busy_operation: str | None = None
     _monitor_task: asyncio.Task | None = None
-    _known_packets: dict[str, DominionPacket] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.client_temp_public_key = b""
@@ -303,9 +299,6 @@ class _RemoteConnection:
         reported_close = False
         reported_stuck_since: float | None = None
         reported_unread = False
-        reported_silent = False
-        last_buffered = 0
-        last_rx_growth = monotonic()
         last_heartbeat = monotonic()
         LOGGER.debug("SDG monitor started %s", self.diagnostic_context())
         while True:
@@ -322,16 +315,6 @@ class _RemoteConnection:
             elif buffered and not reported_unread:
                 reported_unread = True
                 LOGGER.debug("SDG monitor unread data while idle bytes=%d %s", buffered, self.diagnostic_context())
-            # A live peer tunnel grows the buffer every second while idle; a request drains it.
-            if self._busy_since is not None or buffered != last_buffered:
-                last_buffered = buffered
-                last_rx_growth = now
-                reported_silent = False
-            elif self.mode == MODE_PEER and not reported_silent and now - last_rx_growth >= PEER_SILENCE_WARNING_S:
-                reported_silent = True
-                LOGGER.warning(
-                    "SDG monitor peer silent while idle silent_s=%.1f %s", now - last_rx_growth, self.diagnostic_context(),
-                )
             if (
                 self._busy_since is not None
                 and now - self._busy_since > MONITOR_STUCK_OPERATION_S
@@ -405,24 +388,26 @@ class _RemoteConnection:
         LOGGER.debug("SDG send TELL mode=%s", self.mode)
         await self.send_raw(build_header(CMD_TELL, 10))
 
-    async def _send_packet(self, command: bytes, payload: bytes) -> None:
-        LOGGER.debug("SDG send packet mode=%s command=%s payload_len=%d", self.mode, command.decode(), len(payload))
+    async def _send_packet(self, command: bytes, payload: bytes, log: bool = True) -> None:
+        if log:
+            LOGGER.debug("SDG send packet mode=%s command=%s payload_len=%d", self.mode, command.decode(), len(payload))
         await self.send_raw(build_header(command, 10 + len(payload)) + payload)
 
-    async def _send_mesg(self, msg_type: int, payload: bytes) -> None:
+    async def _send_mesg(self, msg_type: int, payload: bytes, log: bool = True) -> None:
         data_packet = build_data_packet(msg_type, payload)
         message = (b"\x00" * CRYPTO_BOX_ZEROBYTES) + data_packet
         nonce = build_short_term_nonce(b"CurveCP-client-M", self._next_nonce_value())
         ciphertext = self._encrypt_afternm(message, nonce)
-        LOGGER.debug(
-            "SDG send MESG mode=%s type=%d payload_len=%d nonce=%d ciphertext_len=%d",
-            self.mode,
-            msg_type,
-            len(payload),
-            int.from_bytes(nonce[16:24], "big"),
-            len(ciphertext),
-        )
-        await self._send_packet(CMD_MESG, nonce[16:24] + ciphertext)
+        if log:
+            LOGGER.debug(
+                "SDG send MESG mode=%s type=%d payload_len=%d nonce=%d ciphertext_len=%d",
+                self.mode,
+                msg_type,
+                len(payload),
+                int.from_bytes(nonce[16:24], "big"),
+                len(ciphertext),
+            )
+        await self._send_packet(CMD_MESG, nonce[16:24] + ciphertext, log=log)
 
     async def _send_forward_remote(self) -> None:
         if self.tunnel_id is None:
@@ -488,8 +473,8 @@ class _RemoteConnection:
         await self._send_mesg(control.MSG_PROTOCOL_VERSION, control.encode_protocol_version(ProtocolVersion()))
 
     async def _send_ping(self) -> None:
-        LOGGER.debug("SDG send ping seq=%d delay=%s", self.ping_sequence, self.ping_delay)
-        await self._send_mesg(control.MSG_PING, control.encode_ping(self.ping_sequence, self.ping_delay))
+        # Pings run every 30 s; GridSession._ping logs their roundtrip, failures are warnings.
+        await self._send_mesg(control.MSG_PING, control.encode_ping(self.ping_sequence, self.ping_delay), log=False)
         self.ping_sequence += 1
 
     def _decrypt_mesg(self, payload: bytes, prefix: bytes) -> bytes:
@@ -559,14 +544,14 @@ class _RemoteConnection:
                 raise SDGProtocolError(f"unexpected command {header.command!r}")
 
     async def _handle_grid_message(self, msg_type: int, payload: bytes) -> None:
-        LOGGER.debug("SDG grid message type=%d payload_len=%d", msg_type, len(payload))
+        if msg_type != control.MSG_PONG:
+            LOGGER.debug("SDG grid message type=%d payload_len=%d", msg_type, len(payload))
         if msg_type == control.MSG_PROTOCOL_VERSION:
             version = control.decode_protocol_version(payload)
             if version.magic != control.PROTOCOL_VERSION_MAGIC:
                 raise SDGProtocolError("invalid protocol version magic")
             await self._send_ping()
         elif msg_type == control.MSG_PONG:
-            LOGGER.debug("SDG recv PONG")
             control.decode_pong(payload)
             self.connected = True
         elif msg_type in (control.MSG_REMOTE_REPLY, control.MSG_PAIR_REMOTE_REPLY):
@@ -674,10 +659,9 @@ class _RemoteConnection:
         # Data buffered before the request is not a reply to it, but it is read as one.
         buffered_before = self._rx_buffered()
         try:
-            requested_order = _packet_ids(GridSession._parse_dominion_wire_stream(payload))
+            requested = set(_packet_ids(GridSession._parse_dominion_wire_stream(payload)))
         except (ValueError, struct.error):
-            requested_order = []
-        requested = set(requested_order)
+            requested = set()
         LOGGER.debug(
             "SDG request peer data payload_len=%d first_chunk_timeout=%.2f idle_timeout=%.2f buffered_before=%d requested=%d",
             len(payload),
@@ -699,13 +683,6 @@ class _RemoteConnection:
         # The peer streams the same packets nonstop; log each distinct chunk once per request.
         logged_chunks: set[str] = set()
         repeated_chunks = 0
-        # Values the answer changed although the thermostat did not push the change: what only polling finds.
-        # The answer lists the requested packets in request order. Pushes of requested packets (measurements)
-        # may arrive before it, even in the same chunk, and are not the answer.
-        answer_start = requested_order[:2]
-        answer_started = False
-        poll_checked: set[str] = set()
-        poll_changes: list[str] = []
 
         def log_incomplete() -> None:
             LOGGER.warning(
@@ -757,19 +734,6 @@ class _RemoteConnection:
                     answered.add(packet_id)
                 else:
                     unsolicited[packet_id] = unsolicited.get(packet_id, 0) + 1
-            for index, (packet_id, packet) in enumerate(zip(packet_ids, packets)):
-                if not answer_started and not from_buffer and answer_start:
-                    answer_started = packet_ids[index : index + len(answer_start)] == answer_start
-                in_answer = answer_started and packet_id in requested
-                known = self._known_packets.get(packet_id)
-                if (
-                    in_answer and packet_id not in poll_checked
-                    and known is not None and known.payload != packet.payload
-                ):
-                    poll_changes.append(f"{packet_id}:{_packet_value(known)}->{_packet_value(packet)}")
-                if in_answer:
-                    poll_checked.add(packet_id)
-                self._known_packets[packet_id] = packet
             if all_answered is None and requested and answered >= requested:
                 all_answered = f"{monotonic() - started_at:.2f}@chunk{len(responses)}"
             if dedup_key in logged_chunks:
@@ -784,16 +748,13 @@ class _RemoteConnection:
                 break
         LOGGER.debug(
             "SDG peer data done chunks=%d repeated_chunks=%d bytes=%d elapsed_s=%.2f buffered_chunks=%d requested=%d answered=%d "
-            "all_answered=%s missing=%s poll_changes=%s unsolicited=%s %s",
+            "all_answered=%s missing=%s unsolicited=%s %s",
             len(responses), repeated_chunks, sum(len(chunk) for chunk in responses), monotonic() - started_at,
             buffered_chunks, len(requested), len(answered), all_answered,
             ",".join(sorted(requested - answered)) or "none",
-            ",".join(poll_changes) or "none",
             ",".join(f"{packet_id}x{count}" for packet_id, count in sorted(unsolicited.items(), key=lambda item: -item[1])) or "none",
             self.diagnostic_context(),
         )
-        if poll_changes:
-            LOGGER.info("SDG poll found changes the thermostat did not push changes=%s", ",".join(poll_changes))
         return responses
 
 
@@ -1149,6 +1110,7 @@ class GridSession:
                 request_payload,
                 first_chunk_timeout=3.0,
                 idle_timeout=1.0,
+                stop_when_answered=True,
             )
         finally:
             await conn.close()

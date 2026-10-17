@@ -77,13 +77,10 @@ class DeviClimateEntity(DeviCoordinatorEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         if "temperature" in kwargs:
-            await self.coordinator.client.set_target_temperature(kwargs["temperature"])
-            await self.coordinator.async_request_refresh()
+            await self.coordinator.async_command(self.coordinator.client.set_target_temperature(kwargs["temperature"]))
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        await self.coordinator.client.set_hvac_mode(DeviHVACMode(hvac_mode.value))
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_command(self.coordinator.client.set_hvac_mode(DeviHVACMode(hvac_mode.value)))
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
-        await self.coordinator.client.set_preset_mode(HA_TO_PRESET[preset_mode])
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_command(self.coordinator.client.set_preset_mode(HA_TO_PRESET[preset_mode]))

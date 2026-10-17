@@ -12,8 +12,11 @@ class _FakeConnection:
         self.closed = False
         self.request_payloads: list[bytes] = []
 
-    async def request_peer_data(self, payload: bytes, first_chunk_timeout: float = 5.0, idle_timeout: float = 1.0) -> list[bytes]:
+    async def request_peer_data(
+        self, payload: bytes, first_chunk_timeout: float = 5.0, idle_timeout: float = 1.0, stop_when_answered: bool = False,
+    ) -> list[bytes]:
         self.request_payloads.append(payload)
+        self.stop_when_answered = stop_when_answered
         return self._responses
 
     async def close(self) -> None:
@@ -50,6 +53,8 @@ class DiscoveryEnrichmentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(info.metadata["zone"], "Upstairs")
         self.assertTrue(conn.closed)
         self.assertEqual(len(conn.request_payloads), 1)
+        # The thermostat pushes its clock every second, so only the answer can end the request.
+        self.assertTrue(conn.stop_when_answered)
 
     def test_house_config_from_dict_keeps_zone_and_metadata(self) -> None:
         config = house_config_from_dict(

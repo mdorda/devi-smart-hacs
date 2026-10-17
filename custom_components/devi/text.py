@@ -80,13 +80,9 @@ class DeviScheduleTextEntity(DeviCoordinatorEntity, TextEntity):
     async def async_set_value(self, value: str) -> None:
         current = self.coordinator.client.state.weekly_schedule
         if current is None:
-            await self.coordinator.async_request_refresh()
-            current = self.coordinator.client.state.weekly_schedule
-        if current is None:
             raise ValueError("schedule is not available yet")
         plan = decode_week_schedule(current.week_1_raw, current.week_2_raw).days
         day_name = self.entity_description.key.removeprefix("schedule_").upper()
         plan[day_name] = parse_day_ranges_text(value)
         week_1, week_2 = encode_week_schedule(plan)
-        await self.coordinator.client.set_weekly_schedule(week_1, week_2)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_command(self.coordinator.client.set_weekly_schedule(week_1, week_2))

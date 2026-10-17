@@ -63,5 +63,4 @@ class DeviNumberEntity(DeviCoordinatorEntity, NumberEntity):
         return getattr(self.coordinator.data, STATE_ATTR[self.entity_description.key])
 
     async def async_set_native_value(self, value: float) -> None:
-        await self.coordinator.client.set_number_setting(self.entity_description.key, value)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_command(self.coordinator.client.set_number_setting(self.entity_description.key, value))

@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, entity_registry as er, service
 import voluptuous as vol
 
-from .pydevi.dominion.client import ThermostatClient
+from .pydevi.dominion.client import PROBE_REQUEST, ThermostatClient
 from .pydevi.dominion.schedule import decode_week_schedule
 from .pydevi.models import AwayInterval, HouseConfig, ThermostatInfo
 from .pydevi.sdg.grid import GridSession
-from .pydevi.sdg.peer import PeerSession
+from .pydevi.sdg.link import PeerLink
 
 from .const import (
     CONF_THERMOSTATS,
@@ -24,7 +27,6 @@ from .const import (
     SERVICE_GET_SCHEDULE,
     SERVICE_SET_AWAY_INTERVAL,
     SERVICE_SET_WEEKLY_SCHEDULE,
-    option_scan_interval_seconds,
     option_enabled,
 )
 from .coordinator import DeviThermostatCoordinator
@@ -32,6 +34,9 @@ from .coordinator import DeviThermostatCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+# The thermostat sends its full state right after the tunnel connects, normally within two seconds.
+READY_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -79,9 +84,7 @@ async def _service_entities_for_call(hass: HomeAssistant, call: ServiceCall) -> 
 async def _async_handle_get_schedule(hass: HomeAssistant, call: ServiceCall) -> dict:
     result: dict[str, dict[str, object | None]] = {}
     for entity_id, runtime, peer_id in await _service_entities_for_call(hass, call):
-        coordinator = runtime.coordinators[peer_id]
-        await coordinator.async_request_refresh()
-        state = coordinator.data or runtime.clients[peer_id].state
+        state = runtime.clients[peer_id].state
         schedule = state.weekly_schedule
         away = state.away_interval
         result[entity_id] = {
@@ -99,8 +102,7 @@ async def _async_handle_set_weekly_schedule(hass: HomeAssistant, call: ServiceCa
     week_1 = _normalize_hex_payload(call.data["week_1_hex"])
     week_2 = _normalize_hex_payload(call.data["week_2_hex"]) if call.data.get("week_2_hex") else None
     for _, runtime, peer_id in await _service_entities_for_call(hass, call):
-        await runtime.clients[peer_id].set_weekly_schedule(week_1, week_2)
-        await runtime.coordinators[peer_id].async_request_refresh()
+        await runtime.coordinators[peer_id].async_command(runtime.clients[peer_id].set_weekly_schedule(week_1, week_2))
 
 
 async def _async_handle_set_away_interval(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -109,8 +111,8 @@ async def _async_handle_set_away_interval(hass: HomeAssistant, call: ServiceCall
     away = None if start is None and end is None else AwayInterval(start=start, end=end)
     is_planned = call.data.get("is_planned", True)
     for _, runtime, peer_id in await _service_entities_for_call(hass, call):
-        await runtime.clients[peer_id].set_away_interval(away, is_planned=is_planned)
-        await runtime.coordinators[peer_id].async_request_refresh()
+        coordinator = runtime.coordinators[peer_id]
+        await coordinator.async_command(runtime.clients[peer_id].set_away_interval(away, is_planned=is_planned))
 
 
 async def _async_register_services(hass: HomeAssistant) -> None:
@@ -188,20 +190,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     grid = GridSession(private_key_hex=entry.data["private_key"], user_name=entry.data["user_name"])
     clients = {
-        thermostat.peer_id: ThermostatClient(PeerSession(grid, thermostat.peer_id))
+        thermostat.peer_id: ThermostatClient(PeerLink(grid, thermostat.peer_id, probe=PROBE_REQUEST))
         for thermostat in thermostats
     }
     coordinators = {
-        thermostat.peer_id: DeviThermostatCoordinator(
-            hass,
-            clients[thermostat.peer_id],
-            thermostat.peer_id,
-            scan_interval_seconds=option_scan_interval_seconds(entry.options),
-        )
+        thermostat.peer_id: DeviThermostatCoordinator(hass, clients[thermostat.peer_id], thermostat.peer_id)
         for thermostat in thermostats
     }
+    ready = await asyncio.gather(*(coordinator.async_start(READY_TIMEOUT_S) for coordinator in coordinators.values()))
+    if not any(ready):
+        # Nothing to show yet; Home Assistant retries the setup with its own backoff.
+        await _async_stop(coordinators, grid)
+        raise ConfigEntryNotReady("no DEVI thermostat sent its state")
     entry.runtime_data = DeviRuntimeEntryData(house=house, grid=grid, clients=clients, coordinators=coordinators)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    async def _async_stop_on_shutdown(_event: Event) -> None:
+        # Home Assistant does not unload entries when it stops, so the open tunnels are closed here.
+        await _async_stop(coordinators, grid)
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop_on_shutdown))
     await _async_register_services(hass)
     platforms = list(PLATFORMS)
     if option_enabled(entry.options, OPT_ENABLE_ADVANCED_ENTITIES, DEFAULT_ENABLE_ADVANCED_ENTITIES):
@@ -216,10 +224,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     platforms = getattr(entry.runtime_data, "platforms", PLATFORMS)
     unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms)
     if unload_ok and entry.runtime_data:
-        for client in entry.runtime_data.clients.values():
-            await client.disconnect()
-        await entry.runtime_data.grid.disconnect()
+        await _async_stop(entry.runtime_data.coordinators, entry.runtime_data.grid)
     return unload_ok
+
+
+async def _async_stop(coordinators: dict[str, DeviThermostatCoordinator], grid: GridSession) -> None:
+    for coordinator in coordinators.values():
+        await coordinator.async_stop()
+    await grid.disconnect()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

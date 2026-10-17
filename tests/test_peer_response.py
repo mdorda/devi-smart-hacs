@@ -6,7 +6,6 @@ from unittest.mock import Mock, patch
 from pydevi.dominion.codec import DominionPacket
 from pydevi.sdg import grid
 from pydevi.sdg.grid import MODE_PEER, _RemoteConnection
-from pydevi.sdg.peer import PeerSession
 from pydevi.sdg.transport import CMD_MESG, PacketHeader
 
 ROOM_TEMPERATURE = (6, 29299)
@@ -112,41 +111,3 @@ class PeerResponseTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(responses), 1)
         self.assertFalse(self.conn.connected)
-
-
-class ClosingConnection:
-    """Returns partial data and is closed by the remote side meanwhile, like a dropped tunnel."""
-
-    def __init__(self) -> None:
-        self.connected = True
-
-    def start_monitor(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        self.connected = False
-
-    async def request_peer_data(self, payload, first_chunk_timeout, idle_timeout, stop_when_answered=False):
-        self.connected = False
-        return [b"partial"]
-
-
-class LiveConnection(ClosingConnection):
-    async def request_peer_data(self, payload, first_chunk_timeout, idle_timeout, stop_when_answered=False):
-        return [b"ok"]
-
-
-class Grid:
-    def __init__(self, connections) -> None:
-        self.connections = connections
-
-    async def connect_to_remote(self, peer_id: str, protocol: str):
-        return self.connections.pop(0)
-
-
-class PeerSessionEofTest(unittest.IsolatedAsyncioTestCase):
-    async def test_closed_during_request_reconnects_in_the_same_poll(self) -> None:
-        grid_ = Grid([ClosingConnection(), LiveConnection()])
-        peer = PeerSession(grid_, "peer")
-        self.assertEqual(await peer.request(b"read"), [b"ok"])
-        self.assertEqual(grid_.connections, [])

@@ -22,8 +22,7 @@
         "title": "Opcje DEVI Smart",
         "data": {
           "enable_advanced_entities": "Włącz encje zaawansowane",
-          "enable_diagnostic_entities": "Włącz encje diagnostyczne",
-          "scan_interval_seconds": "Interwał odpytywania (sekundy)"
+          "enable_diagnostic_entities": "Włącz encje diagnostyczne"
         }
       }
     }

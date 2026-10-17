@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from pydevi.sdg import grid
 from pydevi.sdg.grid import MODE_GRID, _RemoteConnection, _tcp_diagnostics
-from pydevi.sdg.peer import PeerSession
 
 
 def make_connection(reader: asyncio.StreamReader) -> _RemoteConnection:
@@ -114,43 +113,3 @@ class TcpDiagnosticsTest(unittest.TestCase):
         self.assertEqual(_tcp_diagnostics(None), "tcp=n/a")
         with patch.object(grid.sys, "platform", "linux"), patch.object(socket, "TCP_INFO", 11, create=True):
             self.assertEqual(_tcp_diagnostics(Mock()), "tcp=n/a")
-
-
-class FakeConnection:
-    def __init__(self) -> None:
-        self.connected = True
-        self.monitored = False
-
-    def start_monitor(self) -> None:
-        self.monitored = True
-
-    async def close(self) -> None:
-        self.connected = False
-
-    async def request_peer_data(
-        self, payload: bytes, first_chunk_timeout: float, idle_timeout: float, stop_when_answered: bool = False,
-    ) -> list[bytes]:
-        return [b"ok"]
-
-
-class FakeGrid:
-    def __init__(self, connections: list[FakeConnection]) -> None:
-        self._connections = connections
-
-    async def connect_to_remote(self, peer_id: str, protocol: str):
-        return self._connections.pop(0)
-
-
-class PeerConnectionLoggingTest(unittest.IsolatedAsyncioTestCase):
-    async def test_reconnect_is_numbered_and_monitored(self) -> None:
-        first, second = FakeConnection(), FakeConnection()
-        peer = PeerSession(FakeGrid([first, second]), "peer")
-        await peer.request(b"read")
-        first.connected = False
-        with self.assertLogs("pydevi.sdg.peer", "DEBUG") as logs:
-            await peer.request(b"read")
-        output = "\n".join(logs.output)
-        self.assertIn("DEVI peer connecting peer=peer reason=reconnect", output)
-        self.assertIn("DEVI peer connected peer=peer connection_no=2", output)
-        self.assertTrue(first.monitored)
-        self.assertTrue(second.monitored)

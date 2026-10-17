@@ -80,16 +80,7 @@ def _describe_change(name: str, old: object, new: object) -> str:
 
 
 class PeerTransport:
-    async def connect(self) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    async def disconnect(self) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
     async def send(self, payload: bytes) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:  # pragma: no cover - interface
         raise NotImplementedError
 
     def start(self, on_chunk: Callable[[bytes], None], on_connection: Callable[[bool], None]) -> None:  # pragma: no cover - interface
@@ -242,20 +233,6 @@ class ThermostatClient:
     def _peer_id(self) -> str | None:
         return getattr(self._peer, "peer_id", None)
 
-    async def connect(self) -> None:
-        await self._peer.connect()
-
-    async def disconnect(self) -> None:
-        await self._peer.disconnect()
-
-    async def refresh_state(self) -> ThermostatState:
-        packets = [DominionPacket.read_request(*packet_id) for packet_id in STATE_PACKET_IDS]
-        responses = await self._peer.request(b"".join(packet.to_wire_bytes() for packet in packets))
-        for chunk in responses:
-            for packet in DominionPacket.parse_stream(chunk):
-                self.apply_packet(packet)
-        return self._state
-
     async def set_target_temperature(self, value_c: float) -> None:
         code: int | None = None
         if self._state.preset_mode == PresetMode.SCHEDULE:
@@ -330,10 +307,6 @@ class ThermostatClient:
         elif self._state.preset_mode == PresetMode.OFF:
             await self.set_preset_mode(PresetMode.MANUAL)
         self._state.hvac_mode = mode
-
-    async def read_diagnostics(self) -> ThermostatState:
-        await self.refresh_state()
-        return self._state
 
     def apply_packet(self, packet: DominionPacket) -> ThermostatState:
         state = self._state

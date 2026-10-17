@@ -1,6 +1,6 @@
 """SecureDeviceGrid transport scaffolding."""
 
 from .grid import GridSession
-from .peer import PeerSession
+from .link import PeerLink
 
-__all__ = ["GridSession", "PeerSession"]
+__all__ = ["GridSession", "PeerLink"]

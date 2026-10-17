@@ -77,7 +77,7 @@ class DiagnosticsExportTests(unittest.IsolatedAsyncioTestCase):
                 "private_key": "0123456789abcdef",
                 "thermostats": [{"peer_id": "peer-1", "room_name": "Bathroom"}],
             },
-            options={"scan_interval_seconds": 30},
+            options={"enable_advanced_entities": True},
             runtime_data=runtime,
         )
         hass = SimpleNamespace(data={"devi": {"discovery_sessions": {"flow-1": object()}}})

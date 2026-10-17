@@ -2,10 +2,9 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from pydevi.sdg import grid, peer as peer_module
+from pydevi.sdg import grid
 from pydevi.sdg.control import PeerReply
 from pydevi.sdg.grid import MODE_GRID, GridSession, _RemoteConnection
-from pydevi.sdg.peer import PeerSession
 
 
 def make_connection() -> _RemoteConnection:
@@ -78,45 +77,3 @@ class GridReplyTimeoutTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(await session._peer_request(0, 10, b""), reply)
         self.assertIn("SDG grid request failed id=0 attempt=1 error=TimeoutError", logs.output[0])
         self.assertEqual(connections, [])
-
-
-class HangingConnection:
-    def __init__(self) -> None:
-        self.connected = True
-        self.closed = False
-
-    def start_monitor(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        self.closed = True
-        self.connected = False
-
-    async def request_peer_data(self, payload, first_chunk_timeout, idle_timeout, stop_when_answered=False):
-        await asyncio.sleep(10)
-
-
-class FakeGrid:
-    def __init__(self, connection) -> None:
-        self.connection = connection
-        self.disconnect = AsyncMock()
-
-    async def connect_to_remote(self, peer_id: str, protocol: str):
-        return self.connection
-
-
-class OperationTimeoutTest(unittest.IsolatedAsyncioTestCase):
-    async def test_hung_operation_discards_peer_and_grid_connections(self) -> None:
-        connection = HangingConnection()
-        fake_grid = FakeGrid(connection)
-        peer = PeerSession(fake_grid, "peer")
-        with (
-            patch.object(peer_module, "OPERATION_TIMEOUT_S", 0.05),
-            self.assertLogs(peer_module.LOGGER, "WARNING") as logs,
-        ):
-            with self.assertRaises(TimeoutError):
-                await peer.request(b"read")
-        self.assertIn("DEVI peer operation timeout peer=peer operation=request", logs.output[0])
-        self.assertTrue(connection.closed)
-        self.assertFalse(peer.connected)
-        fake_grid.disconnect.assert_awaited_once()

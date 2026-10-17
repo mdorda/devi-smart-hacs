@@ -51,15 +51,14 @@ class DeviSwitchEntity(DeviCoordinatorEntity, SwitchEntity):
         return getattr(self.coordinator.data, STATE_ATTR[self.entity_description.key])
 
     async def async_turn_on(self, **kwargs) -> None:
-        if self.entity_description.key == "away_planned":
-            await self.coordinator.client.set_away_interval(self.coordinator.client.state.away_interval, is_planned=True)
-        else:
-            await self.coordinator.client.set_switch_setting(self.entity_description.key, True)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_command(self._set(True))
 
     async def async_turn_off(self, **kwargs) -> None:
+        await self.coordinator.async_command(self._set(False))
+
+    async def _set(self, enabled: bool) -> None:
+        client = self.coordinator.client
         if self.entity_description.key == "away_planned":
-            await self.coordinator.client.set_away_interval(self.coordinator.client.state.away_interval, is_planned=False)
+            await client.set_away_interval(client.state.away_interval, is_planned=enabled)
         else:
-            await self.coordinator.client.set_switch_setting(self.entity_description.key, False)
-        await self.coordinator.async_request_refresh()
+            await client.set_switch_setting(self.entity_description.key, enabled)

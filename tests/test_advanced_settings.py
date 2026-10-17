@@ -1,7 +1,7 @@
 import unittest
 
 from pydevi.dominion import constants as c
-from pydevi.dominion.client import ThermostatClient
+from pydevi.dominion.client import STATE_PACKET_IDS, ThermostatClient
 from pydevi.dominion.codec import DominionPacket
 
 
@@ -19,32 +19,14 @@ def parse_wire_packets(data: bytes) -> list[DominionPacket]:
 class DummyPeer:
     def __init__(self) -> None:
         self.sent_payloads: list[bytes] = []
-        self.request_payloads: list[bytes] = []
-
-    async def connect(self) -> None:
-        return None
-
-    async def disconnect(self) -> None:
-        return None
 
     async def send(self, payload: bytes) -> None:
         self.sent_payloads.append(payload)
 
-    async def request(self, payload: bytes, timeout: float = 1.0) -> list[bytes]:
-        self.request_payloads.append(payload)
-        return []
-
 
 class AdvancedSettingsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_refresh_state_requests_advanced_codes(self) -> None:
-        peer = DummyPeer()
-        client = ThermostatClient(peer)
-
-        await client.refresh_state()
-
-        self.assertEqual(len(peer.request_payloads), 1)
-        packets = parse_wire_packets(peer.request_payloads[0])
-        codes = {packet.msg_code for packet in packets}
+    def test_state_tracks_advanced_codes(self) -> None:
+        codes = {code for _, code in STATE_PACKET_IDS}
         self.assertIn(c.SCHEDULER_SETPOINT_FLOOR_COMFORT, codes)
         self.assertIn(c.SCHEDULER_SETPOINT_FLOOR_COMFORT_ENABLED, codes)
         self.assertIn(c.SCHEDULER_SETPOINT_MAX_FLOOR, codes)
