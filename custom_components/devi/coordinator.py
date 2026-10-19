@@ -5,7 +5,7 @@ import logging
 from time import monotonic
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -52,6 +52,8 @@ class DeviThermostatCoordinator(DataUpdateCoordinator[ThermostatState]):
             await command
         except (SDGProtocolError, OSError) as exc:
             raise HomeAssistantError(f"DEVI thermostat command failed: {exc}") from exc
+        except ValueError as exc:
+            raise ServiceValidationError(f"DEVI thermostat command refused: {exc}") from exc
         self.async_set_updated_data(self.client.state)
 
     async def _async_update_data(self) -> ThermostatState:

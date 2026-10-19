@@ -6,10 +6,9 @@ import logging
 from homeassistant.components.datetime import DateTimeEntity, DateTimeEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-from .pydevi.models import AwayInterval
 
 from . import DeviRuntimeEntryData
 from .entity import DeviCoordinatorEntity
@@ -59,13 +58,4 @@ class DeviAwayDateTimeEntity(DeviCoordinatorEntity, DateTimeEntity):
         return away.end
 
     async def async_set_value(self, value: datetime) -> None:
-        current = self.coordinator.client.state.away_interval or AwayInterval(start=None, end=None)
-        if self.entity_description.key == "away_start":
-            away = AwayInterval(start=value, end=current.end)
-        else:
-            away = AwayInterval(start=current.start, end=value)
-        if away.start and away.end and away.start >= away.end:
-            raise ValueError("away start must be before away end")
-        await self.coordinator.async_command(
-            self.coordinator.client.set_away_interval(away, is_planned=bool(self.coordinator.client.state.away_planned))
-        )
+        raise ServiceValidationError("Vacation dates are read-only: no reference implementation writes them. Use the vacation preset instead.")

@@ -2,19 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_registry as er, service
 import voluptuous as vol
 
 from .pydevi.dominion.client import PROBE_REQUEST, ThermostatClient
 from .pydevi.dominion.schedule import decode_week_schedule
-from .pydevi.models import AwayInterval, HouseConfig, ThermostatInfo
+from .pydevi.models import HouseConfig, ThermostatInfo
 from .pydevi.sdg.grid import GridSession
 from .pydevi.sdg.link import PeerLink
 
@@ -25,7 +24,6 @@ from .const import (
     OPT_ENABLE_ADVANCED_ENTITIES,
     PLATFORMS,
     SERVICE_GET_SCHEDULE,
-    SERVICE_SET_AWAY_INTERVAL,
     SERVICE_SET_WEEKLY_SCHEDULE,
     option_enabled,
 )
@@ -49,13 +47,10 @@ class DeviRuntimeEntryData:
 
 
 def _normalize_hex_payload(value: str) -> bytes:
-    return bytes.fromhex("".join(value.split()))
-
-
-def _normalize_datetime(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        return bytes.fromhex("".join(value.split()))
+    except ValueError as exc:
+        raise ServiceValidationError(f"not a hex payload: {exc}") from exc
 
 
 async def _service_entities_for_call(hass: HomeAssistant, call: ServiceCall) -> list[tuple[str, DeviRuntimeEntryData, str]]:
@@ -100,19 +95,9 @@ async def _async_handle_get_schedule(hass: HomeAssistant, call: ServiceCall) -> 
 
 async def _async_handle_set_weekly_schedule(hass: HomeAssistant, call: ServiceCall) -> None:
     week_1 = _normalize_hex_payload(call.data["week_1_hex"])
-    week_2 = _normalize_hex_payload(call.data["week_2_hex"]) if call.data.get("week_2_hex") else None
+    week_2 = _normalize_hex_payload(call.data["week_2_hex"])
     for _, runtime, peer_id in await _service_entities_for_call(hass, call):
         await runtime.coordinators[peer_id].async_command(runtime.clients[peer_id].set_weekly_schedule(week_1, week_2))
-
-
-async def _async_handle_set_away_interval(hass: HomeAssistant, call: ServiceCall) -> None:
-    start = _normalize_datetime(call.data.get("start"))
-    end = _normalize_datetime(call.data.get("end"))
-    away = None if start is None and end is None else AwayInterval(start=start, end=end)
-    is_planned = call.data.get("is_planned", True)
-    for _, runtime, peer_id in await _service_entities_for_call(hass, call):
-        coordinator = runtime.coordinators[peer_id]
-        await coordinator.async_command(runtime.clients[peer_id].set_away_interval(away, is_planned=is_planned))
 
 
 async def _async_register_services(hass: HomeAssistant) -> None:
@@ -121,9 +106,6 @@ async def _async_register_services(hass: HomeAssistant) -> None:
 
     async def handle_set_weekly_schedule(call: ServiceCall) -> None:
         await _async_handle_set_weekly_schedule(hass, call)
-
-    async def handle_set_away_interval(call: ServiceCall) -> None:
-        await _async_handle_set_away_interval(hass, call)
 
     if not hass.services.has_service(DOMAIN, SERVICE_GET_SCHEDULE):
         _LOGGER.debug("Registering service %s.%s", DOMAIN, SERVICE_GET_SCHEDULE)
@@ -144,22 +126,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
                 {
                     vol.Required("entity_id"): cv.entity_ids,
                     vol.Required("week_1_hex"): cv.string,
-                    vol.Optional("week_2_hex"): cv.string,
-                }
-            ),
-        )
-    if not hass.services.has_service(DOMAIN, SERVICE_SET_AWAY_INTERVAL):
-        _LOGGER.debug("Registering service %s.%s", DOMAIN, SERVICE_SET_AWAY_INTERVAL)
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SET_AWAY_INTERVAL,
-            handle_set_away_interval,
-            schema=vol.Schema(
-                {
-                    vol.Required("entity_id"): cv.entity_ids,
-                    vol.Optional("start"): vol.Any(None, cv.string),
-                    vol.Optional("end"): vol.Any(None, cv.string),
-                    vol.Optional("is_planned", default=True): bool,
+                    vol.Required("week_2_hex"): cv.string,
                 }
             ),
         )

@@ -47,6 +47,21 @@ class AdvancedSettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet.get_decimal(), 28.5)
         self.assertEqual(client.state.max_floor_temperature_c, 28.5)
 
+    async def test_setpoints_outside_the_thermostat_range_are_refused(self) -> None:
+        peer = DummyPeer()
+        client = ThermostatClient(peer)
+
+        for setting, value in (
+            ("max_floor_temperature", 33.5),
+            ("frost_protection_temperature", 10.0),
+            ("away_temperature", 9.5),
+            ("comfort_temperature", 4.5),
+            ("comfort_temperature", 21.3),
+        ):
+            with self.assertRaises(ValueError):
+                await client.set_number_setting(setting, value)
+        self.assertEqual(peer.sent_payloads, [])
+
     async def test_set_switch_setting_sends_bool_packet(self) -> None:
         peer = DummyPeer()
         client = ThermostatClient(peer)
@@ -55,7 +70,8 @@ class AdvancedSettingsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(peer.sent_payloads), 1)
         packet = parse_wire_packets(peer.sent_payloads[0])[0]
-        self.assertEqual(packet.msg_code, c.SYSTEM_INFO_WINDOW_OPEN_DETECTION)
+        # The openHAB binding writes the detection setting to SYSTEM_WINDOW_OPEN.
+        self.assertEqual(packet.msg_code, c.SYSTEM_WINDOW_OPEN)
         self.assertTrue(packet.get_bool())
         self.assertTrue(client.state.window_open_detection_enabled)
 
@@ -63,12 +79,14 @@ class AdvancedSettingsTest(unittest.IsolatedAsyncioTestCase):
         client = ThermostatClient(DummyPeer())
 
         client.apply_packet(DominionPacket.from_bool(c.DOMINION_SYSTEM, c.SYSTEM_WINDOW_OPEN, True))
+        client.apply_packet(DominionPacket.from_bool(c.DOMINION_SYSTEM, c.SYSTEM_INFO_WINDOW_OPEN_DETECTION, False))
         client.apply_packet(DominionPacket.from_decimal(c.DOMINION_SCHEDULER, c.SCHEDULER_SETPOINT_FLOOR_COMFORT, 23.0))
         client.apply_packet(DominionPacket.from_decimal(c.DOMINION_SCHEDULER, c.SCHEDULER_SETPOINT_MAX_FLOOR, 29.5))
         client.apply_packet(DominionPacket.from_bool(c.DOMINION_SYSTEM, c.SYSTEM_INFO_FORECAST_ENABLED, True))
         client.apply_packet(DominionPacket.from_bool(c.DOMINION_SYSTEM, c.SYSTEM_UI_SAFETY_LOCK, True))
 
-        self.assertTrue(client.state.window_open_active)
+        self.assertTrue(client.state.window_open_detection_enabled)
+        self.assertFalse(client.state.window_open_active)
         self.assertEqual(client.state.floor_comfort_temperature_c, 23.0)
         self.assertEqual(client.state.max_floor_temperature_c, 29.5)
         self.assertTrue(client.state.forecast_heating_enabled)

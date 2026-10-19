@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
@@ -184,3 +184,13 @@ async def test_stop_stops_the_client(hass) -> None:
 
     assert client.stopped
     assert coordinator.last_update_success
+
+
+async def test_refused_command_is_a_validation_error(hass) -> None:
+    coordinator, _ = await started(hass)
+
+    async def refused() -> None:
+        raise ValueError("a planned vacation needs both a start and an end")
+
+    with pytest.raises(ServiceValidationError, match="refused"):
+        await coordinator.async_command(refused())

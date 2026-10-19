@@ -47,7 +47,7 @@ Supported today:
 - Live state pushed by the thermostat, without polling
 - Target temperature changes
 - Preset and HVAC mode changes
-- Weekly schedule and away interval service support
+- Weekly schedule service support; vacation dates are read-only (start a vacation with the vacation preset)
 - Diagnostics export
 
 Known limitations:

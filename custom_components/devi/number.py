@@ -6,6 +6,8 @@ from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .pydevi.dominion.client import SETPOINT_LIMITS_C, SETPOINT_STEP_C, ThermostatClient
+
 from . import DeviRuntimeEntryData
 from .entity import DeviCoordinatorEntity
 
@@ -48,11 +50,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class DeviNumberEntity(DeviCoordinatorEntity, NumberEntity):
-    _attr_native_step = 0.5
+    _attr_native_step = SETPOINT_STEP_C
 
     def __init__(self, coordinator, thermostat, description: NumberEntityDescription) -> None:
         super().__init__(coordinator, thermostat)
         self.entity_description = description
+        _, code = ThermostatClient.NUMBER_SETTINGS[description.key]
+        self._attr_native_min_value, self._attr_native_max_value = SETPOINT_LIMITS_C[code]
         self._attr_unique_id = f"{thermostat.peer_id}_{description.key}"
         self._attr_name = f"{thermostat.room_name} {description.name}"
 

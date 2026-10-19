@@ -3,6 +3,7 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -59,6 +60,6 @@ class DeviSwitchEntity(DeviCoordinatorEntity, SwitchEntity):
     async def _set(self, enabled: bool) -> None:
         client = self.coordinator.client
         if self.entity_description.key == "away_planned":
-            await client.set_away_interval(client.state.away_interval, is_planned=enabled)
+            raise ServiceValidationError("Away Planned is read-only: use the vacation preset instead.")
         else:
             await client.set_switch_setting(self.entity_description.key, enabled)

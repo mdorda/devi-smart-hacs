@@ -2,7 +2,6 @@ DOMAIN = "devi"
 PLATFORMS = ["climate", "sensor", "binary_sensor"]
 SERVICE_GET_SCHEDULE = "get_schedule"
 SERVICE_SET_WEEKLY_SCHEDULE = "set_weekly_schedule"
-SERVICE_SET_AWAY_INTERVAL = "set_away_interval"
 CONF_CLIENT_NAME = "client_name"
 CONF_PRIVATE_KEY = "private_key"
 CONF_HOUSE_ID = "house_id"

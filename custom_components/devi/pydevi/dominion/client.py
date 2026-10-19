@@ -9,8 +9,9 @@ import logging
 import struct
 from time import monotonic
 
-from ..models import AwayInterval, ControlState, HVACMode, PresetMode, ThermostatState, WeeklySchedule
+from ..models import ControlState, HVACMode, PresetMode, ThermostatState, WeeklySchedule
 from .codec import DominionPacket
+from .schedule import DAY_NAMES, FIRST_PART_LENGTH, SECOND_PART_LENGTH, decode_week_schedule, encode_week_schedule
 from . import constants as c
 
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +57,22 @@ PROBE_REQUEST = DominionPacket.read_request(c.DOMINION_HEATING, c.HEATING_TEMPER
 READY_TIMEOUT_S = 15.0
 # How long a command waits for the thermostat to push the value it wrote.
 COMMAND_CONFIRM_S = 10.0
+# Ranges the thermostat accepts, from the openHAB DEVIreg binding (Sonic-Amiga/org.openhab.binding.devireg).
+# The firmware keeps fixed-size fields and nobody knows how it treats values outside them.
+SETPOINT_LIMITS_C: dict[int, tuple[float, float]] = {
+    c.SCHEDULER_SETPOINT_COMFORT: (5.0, 28.0),
+    c.SCHEDULER_SETPOINT_ECONOMY: (5.0, 28.0),
+    c.SCHEDULER_SETPOINT_MANUAL: (5.0, 28.0),
+    c.SCHEDULER_SETPOINT_TEMPORARY: (5.0, 28.0),
+    c.SCHEDULER_SETPOINT_AWAY: (10.0, 28.0),
+    c.SCHEDULER_SETPOINT_FROST_PROTECTION: (5.0, 9.0),
+    c.SCHEDULER_SETPOINT_FLOOR_COMFORT: (7.0, 28.0),
+    c.SCHEDULER_SETPOINT_MAX_FLOOR: (7.0, 33.0),
+}
+SETPOINT_STEP_C = 0.5
+# The weekly schedule fields hold a length byte and this many bytes of ranges.
+WEEK_1_LENGTH = FIRST_PART_LENGTH * len(DAY_NAMES)
+WEEK_2_LENGTH = SECOND_PART_LENGTH * len(DAY_NAMES)
 # Values identifying the home or its owner stay out of logs.
 _REDACTED_FIELDS = frozenset({"room_name", "house_name", "serial_number", "zone_name"})
 _STATE_FIELDS = tuple(item.name for item in fields(ThermostatState))
@@ -101,7 +118,7 @@ class ThermostatClient:
     }
     SWITCH_SETTINGS: dict[str, tuple[int, int]] = {
         "forecast_heating_enabled": (c.DOMINION_SYSTEM, c.SYSTEM_INFO_FORECAST_ENABLED),
-        "window_open_detection_enabled": (c.DOMINION_SYSTEM, c.SYSTEM_INFO_WINDOW_OPEN_DETECTION),
+        "window_open_detection_enabled": (c.DOMINION_SYSTEM, c.SYSTEM_WINDOW_OPEN),
         "safety_lock_enabled": (c.DOMINION_SYSTEM, c.SYSTEM_UI_SAFETY_LOCK),
         "floor_comfort_enabled": (c.DOMINION_SCHEDULER, c.SCHEDULER_SETPOINT_FLOOR_COMFORT_ENABLED),
     }
@@ -234,15 +251,15 @@ class ThermostatClient:
         return getattr(self._peer, "peer_id", None)
 
     async def set_target_temperature(self, value_c: float) -> None:
-        code: int | None = None
-        if self._state.preset_mode == PresetMode.SCHEDULE:
-            await self.set_preset_mode(PresetMode.OVERRIDE)
-            code = c.SCHEDULER_SETPOINT_TEMPORARY
-        elif self._state.preset_mode == PresetMode.OFF:
-            await self.set_preset_mode(PresetMode.MANUAL)
-            code = c.SCHEDULER_SETPOINT_MANUAL
+        # Writes the setpoint of the current state, as ha-devi-mqtt does. The one difference: in the weekly
+        # schedule it starts a temporary override, as the DEVI app does, instead of changing comfort or economy.
+        code = _TARGET_SETPOINTS.get(self._state.control_state)
         if code is None:
-            code = self._active_setpoint_code()
+            raise ValueError(f"no setpoint to change while the thermostat is {self._state.control_state or 'unknown'}")
+        # Checked before the mode change, so nothing goes out for a value that is refused.
+        _check_setpoint(code, value_c)
+        if self._state.control_state in (ControlState.HOME, ControlState.AWAY):
+            await self.set_preset_mode(PresetMode.OVERRIDE)
         await self._send([DominionPacket.from_decimal(c.DOMINION_SCHEDULER, code, value_c)])
         self._state.target_temperature_c = value_c
 
@@ -250,6 +267,7 @@ class ThermostatClient:
         if setting not in self.NUMBER_SETTINGS:
             raise ValueError(f"unsupported number setting: {setting}")
         endpoint, code = self.NUMBER_SETTINGS[setting]
+        _check_setpoint(code, value_c)
         await self._send([DominionPacket.from_decimal(endpoint, code, value_c)])
         if setting == "comfort_temperature":
             self._state.comfort_temperature_c = value_c
@@ -278,35 +296,41 @@ class ThermostatClient:
         elif setting == "floor_comfort_enabled":
             self._state.floor_comfort_enabled = enabled
 
-    async def set_weekly_schedule(self, week_1_raw: bytes, week_2_raw: bytes | None = None) -> None:
-        packets = [DominionPacket(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK, week_1_raw)]
-        if week_2_raw is not None:
-            packets.append(DominionPacket(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK_2, week_2_raw))
-        await self._send(packets)
-        self._state.weekly_schedule = WeeklySchedule(week_1_raw=bytes(week_1_raw), week_2_raw=bytes(week_2_raw) if week_2_raw is not None else None)
-
-    async def set_away_interval(self, away: AwayInterval | None, is_planned: bool = True) -> None:
-        away_packet = DominionPacket.from_away_interval(
-            c.DOMINION_SCHEDULER,
-            c.SCHEDULER_AWAY,
-            away or AwayInterval(start=None, end=None),
-        )
-        planned_packet = DominionPacket.from_bool(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY_ISPLANNED, is_planned)
-        await self._send([away_packet, planned_packet])
-        self._state.away_interval = away
-        self._state.away_planned = is_planned
+    async def set_weekly_schedule(self, week_1_raw: bytes, week_2_raw: bytes) -> None:
+        week_1 = _schedule_part(week_1_raw, WEEK_1_LENGTH, "week_1")
+        week_2 = _schedule_part(week_2_raw, WEEK_2_LENGTH, "week_2")
+        # Only ranges our own encoder would produce go out, so nothing malformed reaches the thermostat.
+        encoded_1, encoded_2 = encode_week_schedule(decode_week_schedule(week_1, week_2).days)
+        if (encoded_1[1:], encoded_2[1:]) != (week_1, week_2):
+            raise ValueError("the weekly schedule holds invalid or unordered ranges")
+        # As ha-devi-mqtt does: clear the schedule first, then write it, each field as an array in a message of its own.
+        week_1_packet = DominionPacket.from_array(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK, week_1)
+        week_2_packet = DominionPacket.from_array(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK_2, week_2)
+        for packet in (
+            DominionPacket.from_array(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK, bytes(WEEK_1_LENGTH)),
+            DominionPacket.from_array(c.DOMINION_SCHEDULER, c.SCHEDULER_WEEK_2, bytes(WEEK_2_LENGTH)),
+            week_1_packet,
+            week_2_packet,
+        ):
+            await self._send([packet])
+        self._state.weekly_schedule = WeeklySchedule(week_1_raw=week_1_packet.payload, week_2_raw=week_2_packet.payload)
 
     async def set_preset_mode(self, mode: PresetMode) -> None:
-        await self._send(self._preset_packets(mode))
+        # Ported from setMode() of the openHAB DEVIreg binding, which follows the original app.
+        current = self._state.control_state
+        if current in (ControlState.CONFIGURING, ControlState.FATAL):
+            raise ValueError(f"the thermostat takes no mode change while {current.value}")
+        if _SPECIAL_STATES.get(current) == mode:
+            return
+        # In a special state the thermostat ignores other mode commands until that state is cancelled.
+        packets = self._leave_packets(current) + self._preset_packets(mode)
+        await self._send(packets)
         self._state.preset_mode = mode
         self._state.hvac_mode = HVACMode.OFF if mode == PresetMode.OFF else HVACMode.HEAT
 
     async def set_hvac_mode(self, mode: HVACMode) -> None:
-        if mode == HVACMode.OFF:
-            await self.set_preset_mode(PresetMode.OFF)
-        elif self._state.preset_mode == PresetMode.OFF:
-            await self.set_preset_mode(PresetMode.MANUAL)
-        self._state.hvac_mode = mode
+        # As ha-devi-mqtt maps the climate modes: off is the off state, heat is the weekly schedule.
+        await self.set_preset_mode(PresetMode.OFF if mode == HVACMode.OFF else PresetMode.SCHEDULE)
 
     def apply_packet(self, packet: DominionPacket) -> ThermostatState:
         state = self._state
@@ -362,13 +386,14 @@ class ThermostatClient:
             state.warning_overheat = bool(alarms & c.ALARM_OVERHEAT)
             state.warning_unrecoverable = bool(alarms & c.ALARM_UNRECOVERABLE)
         elif packet.msg_code == c.SYSTEM_WINDOW_OPEN:
-            state.window_open_active = packet.get_bool()
+            # Despite its name this is the detection setting; the openHAB binding writes it as such.
+            state.window_open_detection_enabled = packet.get_bool()
         elif packet.msg_code == c.SYSTEM_INFO_FLOOR_SENSOR_CONNECTED:
             state.floor_sensor_connected = packet.get_bool()
         elif packet.msg_code == c.SYSTEM_INFO_FORECAST_ENABLED:
             state.forecast_heating_enabled = packet.get_bool()
         elif packet.msg_code == c.SYSTEM_INFO_WINDOW_OPEN_DETECTION:
-            state.window_open_detection_enabled = packet.get_bool()
+            state.window_open_active = packet.get_bool()
         elif packet.msg_code == c.SYSTEM_UI_SAFETY_LOCK:
             state.safety_lock_enabled = packet.get_bool()
         elif packet.msg_code == c.GLOBAL_HARDWAREREVISION:
@@ -433,16 +458,18 @@ class ThermostatClient:
         if self._state.active_setpoint_key == key:
             self._state.target_temperature_c = value
 
-    def _active_setpoint_code(self) -> int:
-        mapping = {
-            "comfort": c.SCHEDULER_SETPOINT_COMFORT,
-            "economy": c.SCHEDULER_SETPOINT_ECONOMY,
-            "manual": c.SCHEDULER_SETPOINT_MANUAL,
-            "temporary": c.SCHEDULER_SETPOINT_TEMPORARY,
-            "away": c.SCHEDULER_SETPOINT_AWAY,
-            "antifreeze": c.SCHEDULER_SETPOINT_FROST_PROTECTION,
-        }
-        return mapping.get(self._state.active_setpoint_key or "manual", c.SCHEDULER_SETPOINT_MANUAL)
+    @staticmethod
+    def _leave_packets(current: ControlState | None) -> list[DominionPacket]:
+        if current == ControlState.VACATION:
+            # The original app clears both the away interval and the planned flag.
+            return [_EMPTY_AWAY_PACKET, DominionPacket.from_bool(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY_ISPLANNED, False)]
+        if current == ControlState.PAUSE:
+            return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_FROST_PROTECTION_OFF)]
+        if current == ControlState.OFF:
+            return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_OFF_STATE_OFF)]
+        if current == ControlState.OVERRIDE:
+            return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_TEMPORARY_HOME_OFF)]
+        return []
 
     def _preset_packets(self, mode: PresetMode) -> list[DominionPacket]:
         if mode == PresetMode.MANUAL:
@@ -452,13 +479,47 @@ class ThermostatClient:
         if mode == PresetMode.SCHEDULE:
             return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_WEEKLY_SCHEDULE_ON)]
         if mode == PresetMode.VACATION:
-            payload = struct.pack("<B", 0) + (b"\x00" * 6) + struct.pack("<B", 0)
-            return [
-                DominionPacket(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY, payload),
-                DominionPacket.from_bool(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY_ISPLANNED, True),
-            ]
+            # An empty interval with the planned flag set starts the vacation right away.
+            return [_EMPTY_AWAY_PACKET, DominionPacket.from_bool(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY_ISPLANNED, True)]
         if mode == PresetMode.PAUSE:
             return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_FROST_PROTECTION_ON)]
         if mode == PresetMode.OFF:
             return [DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_MODE, c.CONTROL_MODE_OFF_STATE_ON)]
         raise ValueError(f"unsupported preset mode: {mode}")
+
+
+# Modes the thermostat sticks in until they are cancelled, and the preset that would ask for them again.
+_SPECIAL_STATES: dict[ControlState, PresetMode] = {
+    ControlState.VACATION: PresetMode.VACATION,
+    ControlState.PAUSE: PresetMode.PAUSE,
+    ControlState.OFF: PresetMode.OFF,
+    ControlState.OVERRIDE: PresetMode.OVERRIDE,
+}
+# The setpoint a target temperature goes to in each state; none while off, configuring, fatal or unknown.
+_TARGET_SETPOINTS: dict[ControlState, int] = {
+    ControlState.MANUAL: c.SCHEDULER_SETPOINT_MANUAL,
+    ControlState.HOME: c.SCHEDULER_SETPOINT_TEMPORARY,
+    ControlState.AWAY: c.SCHEDULER_SETPOINT_TEMPORARY,
+    ControlState.OVERRIDE: c.SCHEDULER_SETPOINT_TEMPORARY,
+    ControlState.VACATION: c.SCHEDULER_SETPOINT_AWAY,
+    ControlState.PAUSE: c.SCHEDULER_SETPOINT_FROST_PROTECTION,
+}
+# The reference's AwayPacket(null, null): 14 zero bytes, i.e. neither date valid.
+_EMPTY_AWAY_PACKET = DominionPacket(c.DOMINION_SCHEDULER, c.SCHEDULER_AWAY, bytes(14))
+
+
+def _check_setpoint(code: int, value_c: float) -> None:
+    low, high = SETPOINT_LIMITS_C[code]
+    if not low <= value_c <= high:
+        raise ValueError(f"{value_c} °C is outside {low}–{high} °C")
+    if round(value_c / SETPOINT_STEP_C) * SETPOINT_STEP_C != value_c:
+        raise ValueError(f"{value_c} °C is not a multiple of {SETPOINT_STEP_C} °C")
+
+
+def _schedule_part(raw: bytes, length: int, name: str) -> bytes:
+    """The ranges of one schedule field, with or without the length byte the thermostat sends."""
+    if len(raw) == length + 1 and raw[0] == length:
+        raw = raw[1:]
+    if len(raw) != length:
+        raise ValueError(f"{name} must be {length} bytes")
+    return bytes(raw)

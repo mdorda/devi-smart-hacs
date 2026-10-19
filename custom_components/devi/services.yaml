@@ -15,7 +15,7 @@ get_schedule:
 
 set_weekly_schedule:
   name: Set weekly schedule
-  description: Write raw weekly schedule payloads to one or more DEVI thermostats.
+  description: Write the raw weekly schedule (week_1 28 bytes, week_2 42 bytes, as get_schedule returns them) to one or more DEVI thermostats.
   target:
     entity:
       integration: devi
@@ -33,33 +33,7 @@ set_weekly_schedule:
       selector:
         text:
     week_2_hex:
+      required: true
       example: "50607080"
       selector:
         text:
-
-set_away_interval:
-  name: Set away interval
-  description: Set or clear the away interval on one or more DEVI thermostats.
-  target:
-    entity:
-      integration: devi
-      domain: climate
-  fields:
-    entity_id:
-      required: true
-      selector:
-        entity:
-          integration: devi
-          domain: climate
-    start:
-      example: "2026-03-18T08:00:00+01:00"
-      selector:
-        text:
-    end:
-      example: "2026-03-19T18:00:00+01:00"
-      selector:
-        text:
-    is_planned:
-      default: true
-      selector:
-        boolean:

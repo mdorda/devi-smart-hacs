@@ -123,53 +123,12 @@ class DominionPacket:
         return datetime(year, month, day, hour, minute, sec, tzinfo=UTC)
 
     def get_away_interval(self) -> AwayInterval:
-        if not self.payload:
+        # struct AwayInterval from opensdg: a size byte (14), then a validity flag and a 6-byte date for start and end.
+        if len(self.payload) < 15 or self.payload[0] != 14:
             return AwayInterval(start=None, end=None)
-        size = self.payload[0]
-        if size == 0:
+        try:
+            start = self.get_date(2) if self.payload[1] else None
+            end = self.get_date(9) if self.payload[8] else None
+        except ValueError:
             return AwayInterval(start=None, end=None)
-        if len(self.payload) < 14:
-            return AwayInterval(start=None, end=None)
-        if size != 13:
-            return AwayInterval(start=None, end=None)
-        start_valid = bool(self.payload[1])
-        end_valid = bool(self.payload[8])
-        start = self.get_date(2) if start_valid else None
-        end = self.get_date(9) if end_valid else None
         return AwayInterval(start=start, end=end)
-
-    @classmethod
-    def from_away_interval(
-        cls,
-        msg_class: int,
-        msg_code: int,
-        away_interval: AwayInterval,
-    ) -> "DominionPacket":
-        payload = bytearray()
-        payload.append(13)
-        if away_interval.start is None:
-            payload.append(0)
-            payload.extend(b"\x00" * 6)
-        else:
-            payload.append(1)
-            payload.extend(_datetime_to_payload(away_interval.start))
-        if away_interval.end is None:
-            payload.append(0)
-            payload.extend(b"\x00" * 6)
-        else:
-            payload.append(1)
-            payload.extend(_datetime_to_payload(away_interval.end))
-        return cls(msg_class=msg_class, msg_code=msg_code, payload=bytes(payload))
-
-
-def _datetime_to_payload(dt: datetime) -> bytes:
-    # Keep upper bits clear to match parsing logic and C bitfield semantics.
-    return struct.pack(
-        "<6B",
-        dt.second,
-        dt.minute,
-        dt.hour & 0x3F,
-        ((dt.weekday() + 1) << 5) | (dt.day & 0x1F),
-        dt.month,
-        max(0, dt.year - 2000) & 0xFF,
-    )
