@@ -134,6 +134,8 @@ class ThermostatClient:
         self._connected_at = 0.0
         self._ready_check: asyncio.Task | None = None
         self._unconfirmed: dict[tuple[int, int], float] = {}
+        # Every setpoint by key, so a schedule transition, which pushes only the control state, can show its own.
+        self._setpoints: dict[str, float | None] = {}
 
     @property
     def state(self) -> ThermostatState:
@@ -452,9 +454,12 @@ class ThermostatClient:
         else:
             self._state.control_state = ControlState.UNKNOWN
 
+        if self._state.active_setpoint_key in self._setpoints:
+            self._state.target_temperature_c = self._setpoints[self._state.active_setpoint_key]
         self._state.hvac_mode = HVACMode.OFF if self._state.preset_mode == PresetMode.OFF else HVACMode.HEAT
 
     def _update_target(self, key: str, value: float | None) -> None:
+        self._setpoints[key] = value
         if self._state.active_setpoint_key == key:
             self._state.target_temperature_c = value
 

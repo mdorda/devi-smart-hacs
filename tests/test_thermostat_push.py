@@ -89,6 +89,21 @@ class ThermostatPushTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("room_name", changed[0])
         self.assertNotIn("Koupelna", changed[0])
 
+    async def test_schedule_transition_follows_the_new_setpoint(self) -> None:
+        def control(info: int) -> DominionPacket:
+            return DominionPacket.from_byte(c.DOMINION_SCHEDULER, c.SCHEDULER_CONTROL_INFO, info)
+
+        economy = DominionPacket.from_decimal(c.DOMINION_SCHEDULER, c.SCHEDULER_SETPOINT_ECONOMY, 16.0)
+        self.link.on_chunk(chunk(control(c.CONTROL_STATE_AT_HOME), DominionPacket.from_decimal(*COMFORT, 21.5), economy))
+        self.assertEqual(self.client.state.target_temperature_c, 21.5)
+
+        # The thermostat pushes only the control state when the schedule switches, not the setpoints.
+        self.link.on_chunk(chunk(control(c.CONTROL_STATE_AWAY)))
+        self.assertEqual(self.client.state.target_temperature_c, 16.0)
+
+        self.link.on_chunk(chunk(control(c.CONTROL_STATE_AT_HOME)))
+        self.assertEqual(self.client.state.target_temperature_c, 21.5)
+
     async def test_ready_once_every_state_packet_arrived(self) -> None:
         self.link.on_connection(True)
         self.link.on_chunk(chunk(room_temperature(22.0)))
